@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  
+  web:
+    build: .  # Looks for the Dockerfile in the current directory
+    ports:
+      - "8000:8000"  # Exposes port 8000 to your machine
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://scholar:scholar@postgres:5432/scholarmetric
+      - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
+    
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scholar
+      POSTGRES_PASSWORD: scholar
+      POSTGRES_DB: scholarmetric
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
