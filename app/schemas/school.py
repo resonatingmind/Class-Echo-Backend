@@ -1,6 +1,7 @@
+from pydantic import BaseModel, EmailStr, model_validator
+from app.services.s3_service import sign_url
+# Rest of file imports...
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
-
 
 class SchoolCreate(BaseModel):
     name: str
@@ -37,3 +38,9 @@ class SchoolOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "SchoolOut":
+        if self.logo_url:
+            self.logo_url = sign_url(self.logo_url)
+        return self

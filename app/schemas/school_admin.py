@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+from app.services.s3_service import sign_url
 
 
 class SchoolAdminProfileOut(BaseModel):
@@ -15,6 +16,14 @@ class SchoolAdminProfileOut(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def sign_s3_urls(self) -> "SchoolAdminProfileOut":
+        if self.profile_pic_url:
+            self.profile_pic_url = sign_url(self.profile_pic_url)
+        if self.school_logo_url:
+            self.school_logo_url = sign_url(self.school_logo_url)
+        return self
 
 
 class SchoolAdminUpdate(BaseModel):

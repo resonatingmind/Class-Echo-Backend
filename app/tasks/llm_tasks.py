@@ -30,7 +30,9 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             recording.status = RecordingStatus.processing
             session.commit()
 
-            report_data = analyze_recording(cloudinary_url)
+            from app.services.s3_service import sign_url
+            fresh_url = sign_url(recording.cloudinary_url) or cloudinary_url
+            report_data = analyze_recording(fresh_url)
 
             report = LLMReport(
                 recording_id=recording_id,

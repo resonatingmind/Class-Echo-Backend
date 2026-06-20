@@ -32,7 +32,8 @@ _MIME_MAP = {
 def _get_client() -> genai.Client:
     global _client
     if _client is None:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        from app.config import settings
+        api_key = os.environ.get("GEMINI_API_KEY") or (settings.GEMINI_API_KEY if hasattr(settings, "GEMINI_API_KEY") else None)
         if not api_key:
             raise EnvironmentError(
                 "GEMINI_API_KEY is not set. Export it before running the pipeline."

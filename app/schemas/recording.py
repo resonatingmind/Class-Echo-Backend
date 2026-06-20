@@ -1,6 +1,7 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from app.models.recording import RecordingStatus
+from app.services.s3_service import sign_url
 
 
 class RecordingOut(BaseModel):
@@ -17,6 +18,12 @@ class RecordingOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "RecordingOut":
+        if self.cloudinary_url:
+            self.cloudinary_url = sign_url(self.cloudinary_url)
+        return self
 
 
 class LLMReportOut(BaseModel):

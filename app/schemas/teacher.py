@@ -1,5 +1,6 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, model_validator
+from app.services.s3_service import sign_url
 
 
 class TeacherCreate(BaseModel):
@@ -19,6 +20,12 @@ class TeacherOut(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "TeacherOut":
+        if self.profile_image_url:
+            self.profile_image_url = sign_url(self.profile_image_url)
+        return self
 
 
 class TeacherUpdate(BaseModel):

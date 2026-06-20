@@ -6,11 +6,15 @@ from tinytag import TinyTag
 from fastapi import UploadFile, HTTPException
 from app.config import settings
 
+from botocore.config import Config
+
 s3_client = boto3.client(
     "s3",
     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
     aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
     region_name=settings.AWS_REGION,
+    endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com" if settings.AWS_REGION else None,
+    config=Config(signature_version="s3v4"),
 )
 
 async def upload_audio(file: UploadFile, subject_id: int) -> dict:
@@ -56,7 +60,19 @@ async def upload_audio(file: UploadFile, subject_id: int) -> dict:
         print("S3 UPLOAD ERROR:", exc)
         raise HTTPException(status_code=502, detail=f"Audio upload failed: {exc}")
 
-    url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": key,
+            },
+            ExpiresIn=604800,  # 7 days
+        )
+    except Exception as exc:
+        print("S3 PRESIGN ERROR:", exc)
+        url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+
     return {
         "url": url,
         "public_id": key,
@@ -94,7 +110,19 @@ async def upload_image(file: UploadFile, folder: str) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Image upload failed: {exc}")
 
-    url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": key,
+            },
+            ExpiresIn=604800,  # 7 days
+        )
+    except Exception as exc:
+        print("S3 PRESIGN ERROR:", exc)
+        url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+
     return {
         "url": url,
         "public_id": key,
@@ -108,3 +136,26 @@ def delete_audio(public_id: str) -> None:
         )
     except Exception as exc:
         print("S3 DELETE ERROR:", exc)
+
+def sign_url(url: str | None, expires_in: int = 604800) -> str | None:
+    """If the URL is an AWS S3 URL, generate a fresh pre-signed URL for it."""
+    if not url or "amazonaws.com/" not in url:
+        return url
+    try:
+        # Extract the key
+        parts = url.split("amazonaws.com/")
+        if len(parts) < 2:
+            return url
+        key = parts[1].split("?")[0]
+        # Generate new pre-signed URL
+        return s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": key,
+            },
+            ExpiresIn=expires_in,
+        )
+    except Exception as exc:
+        print("S3 RE-SIGN ERROR:", exc)
+        return url

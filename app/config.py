@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str | None = None
     AWS_REGION: str | None = None
     AWS_STORAGE_BUCKET_NAME: str | None = None
+    GEMINI_API_KEY: str | None = None
 
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -29,6 +30,7 @@ class Settings(BaseSettings):
         "AWS_SECRET_ACCESS_KEY",
         "AWS_REGION",
         "AWS_STORAGE_BUCKET_NAME",
+        "GEMINI_API_KEY",
         "REDIS_URL",
         "ADMIN_NAME",
         "ADMIN_EMAIL",

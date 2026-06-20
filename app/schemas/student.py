@@ -1,5 +1,6 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, model_validator
+from app.services.s3_service import sign_url
 
 
 class StudentOut(BaseModel):
@@ -30,6 +31,12 @@ class StudentProfileOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "StudentProfileOut":
+        if self.profile_image_url:
+            self.profile_image_url = sign_url(self.profile_image_url)
+        return self
+
 
 class StudentWithClassOut(BaseModel):
     """Student with class name — used by school admin roster."""
@@ -43,6 +50,12 @@ class StudentWithClassOut(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "StudentWithClassOut":
+        if self.profile_image_url:
+            self.profile_image_url = sign_url(self.profile_image_url)
+        return self
 
 
 class StudentUpdate(BaseModel):
