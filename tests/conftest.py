@@ -69,13 +69,17 @@ async def setup_db():
 def cleanup_cloudinary(setup_db):
     """Delete all Cloudinary test uploads after the whole test session ends."""
     yield
-    import cloudinary.uploader
+    try:
+        import cloudinary.uploader
 
-    for public_id in _cloudinary_uploads:
-        try:
-            cloudinary.uploader.destroy(public_id, resource_type="video")
-        except Exception:
-            pass  # best-effort — don't fail teardown
+        for public_id in _cloudinary_uploads:
+            try:
+                cloudinary.uploader.destroy(public_id, resource_type="video")
+            except Exception:
+                pass  # best-effort — don't fail teardown
+    except ModuleNotFoundError:
+        pass  # Cloudinary not installed
+
 
 
 @pytest.fixture(scope="session")

@@ -142,16 +142,29 @@ def sign_url(url: str | None, expires_in: int = 604800) -> str | None:
     if not url or "amazonaws.com/" not in url:
         return url
     try:
-        # Extract the key
+        # Extract the key from the URL.
+        # Path-style URLs look like: https://s3.region.amazonaws.com/BUCKET/KEY?...
+        # Virtual-hosted URLs look like: https://BUCKET.s3.region.amazonaws.com/KEY?...
         parts = url.split("amazonaws.com/")
         if len(parts) < 2:
             return url
-        key = parts[1].split("?")[0]
+        path = parts[1].split("?")[0]
+
+        # If the path starts with the bucket name (path-style), strip it
+        bucket = settings.AWS_STORAGE_BUCKET_NAME
+        if path.startswith(f"{bucket}/"):
+            key = path[len(f"{bucket}/"):]
+        else:
+            key = path
+
+        if not key:
+            return url
+
         # Generate new pre-signed URL
         return s3_client.generate_presigned_url(
             ClientMethod="get_object",
             Params={
-                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Bucket": bucket,
                 "Key": key,
             },
             ExpiresIn=expires_in,
@@ -159,3 +172,4 @@ def sign_url(url: str | None, expires_in: int = 604800) -> str | None:
     except Exception as exc:
         print("S3 RE-SIGN ERROR:", exc)
         return url
+

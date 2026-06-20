@@ -152,7 +152,9 @@ async def upload_recording(
     subject_id: int,
     file: UploadFile = File(...),
     chapter_name: str | None = Form(None),
+    lecture_title: str | None = Form(None),
     description: str | None = Form(None),
+    transcription: str | None = Form(None),
     duration_seconds: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_teacher),
@@ -172,7 +174,9 @@ async def upload_recording(
         subject_id=subject_id,
         teacher_id=teacher.id,
         chapter_name=chapter_name or None,
+        lecture_title=lecture_title or None,
         description=description or None,
+        transcription=transcription or None,
         cloudinary_url=upload_result["url"],
         cloudinary_public_id=upload_result["public_id"],
         duration_seconds=duration_seconds if duration_seconds is not None else upload_result.get("duration"),
@@ -210,6 +214,7 @@ async def retry_recording(
 
     recording.status = "pending"
     recording.processed_at = None
+    recording.error_reason = None
     await db.commit()
 
     process_recording.delay(recording.id, recording.cloudinary_url)

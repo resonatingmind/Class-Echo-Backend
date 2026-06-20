@@ -9,10 +9,13 @@ class RecordingOut(BaseModel):
     subject_id: int
     teacher_id: int
     chapter_name: str | None
+    lecture_title: str | None = None
     description: str | None
+    transcription: str | None = None
     cloudinary_url: str
     duration_seconds: float | None
     status: RecordingStatus
+    error_reason: str | None = None
     uploaded_at: datetime
     processed_at: datetime | None
 

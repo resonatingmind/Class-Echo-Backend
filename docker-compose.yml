@@ -9,8 +9,10 @@ services:
     depends_on:
       - postgres
       - redis
+    env_file:
+      - .env
     environment:
-      - DATABASE_URL=postgresql://scholar:scholar@postgres:5432/scholarmetric
+      - DATABASE_URL=postgresql+asyncpg://scholar:scholar@postgres:5432/scholarmetric
       - REDIS_URL=redis://redis:6379/0
     restart: unless-stopped
     

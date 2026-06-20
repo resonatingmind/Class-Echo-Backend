@@ -19,13 +19,16 @@ class Recording(Base):
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
     teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"))
     chapter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lecture_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcription: Mapped[str | None] = mapped_column(Text, nullable=True)
     cloudinary_url: Mapped[str] = mapped_column(String(500))
     cloudinary_public_id: Mapped[str] = mapped_column(String(255))
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[RecordingStatus] = mapped_column(
         Enum(RecordingStatus), default=RecordingStatus.pending
     )
+    error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
