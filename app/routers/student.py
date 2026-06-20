@@ -15,7 +15,7 @@ from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
 from app.schemas.recording import RecordingWithReport
 from app.schemas.student import StudentProfileOut, StudentUpdate
-from app.services.cloudinary_service import upload_image
+from app.services.s3_service import upload_image
 
 router = APIRouter()
 

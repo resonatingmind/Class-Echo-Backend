@@ -12,7 +12,7 @@ from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut
 from app.schemas.teacher import TeacherOut, TeacherUpdate
-from app.services.cloudinary_service import upload_audio, upload_image
+from app.services.s3_service import upload_audio, upload_image
 from app.tasks.llm_tasks import process_recording
 
 router = APIRouter()

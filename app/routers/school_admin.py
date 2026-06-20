@@ -21,7 +21,7 @@ from app.schemas.teacher import TeacherCreate, TeacherOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
 from app.core.security import hash_password
-from app.services.cloudinary_service import upload_image
+from app.services.s3_service import upload_image
 
 router = APIRouter()
 
