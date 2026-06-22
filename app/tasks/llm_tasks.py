@@ -16,7 +16,8 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    db_url = os.environ.get("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
+    from app.config import settings
+    db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
 

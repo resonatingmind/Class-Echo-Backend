@@ -20,8 +20,10 @@ from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, Assign
 from app.schemas.teacher import TeacherCreate, TeacherOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
+from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut
 from app.core.security import hash_password
 from app.services.s3_service import upload_image
+from app.services import chapter_service
 
 router = APIRouter()
 
@@ -379,6 +381,55 @@ async def list_subject_reports(
         .order_by(LLMReport.created_at.desc())
     )
     return result.scalars().all()
+
+
+# ─── Chapters ─────────────────────────────────────────────────────────────────
+
+@router.post("/subjects/{subject_id}/chapters", response_model=ChapterOut, status_code=201)
+async def create_chapter(
+    subject_id: int,
+    body: ChapterCreate,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await chapter_service.create_chapter(db, subject_id, school_admin.school_id, body)
+
+
+@router.get("/subjects/{subject_id}/chapters", response_model=list[ChapterOut])
+async def list_chapters(
+    subject_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await chapter_service.list_chapters(db, subject_id, school_admin.school_id)
+
+
+@router.get("/chapters/{chapter_id}", response_model=ChapterOut)
+async def get_chapter(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await chapter_service.get_chapter_details(db, chapter_id, school_admin.school_id)
+
+
+@router.put("/chapters/{chapter_id}", response_model=ChapterOut)
+async def update_chapter(
+    chapter_id: int,
+    body: ChapterUpdate,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await chapter_service.update_chapter(db, chapter_id, school_admin.school_id, body)
+
+
+@router.delete("/chapters/{chapter_id}", status_code=204)
+async def delete_chapter(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    await chapter_service.delete_chapter(db, chapter_id, school_admin.school_id)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
