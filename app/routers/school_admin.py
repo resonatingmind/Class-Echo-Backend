@@ -20,10 +20,12 @@ from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, Assign
 from app.schemas.teacher import TeacherCreate, TeacherOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
-from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut
+from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut
 from app.core.security import hash_password
-from app.services.s3_service import upload_image
+from app.services.s3_service import upload_image, upload_document
 from app.services import chapter_service
+from app.models.chapter_document import ChapterDocument
+
 
 router = APIRouter()
 
@@ -432,7 +434,40 @@ async def delete_chapter(
     await chapter_service.delete_chapter(db, chapter_id, school_admin.school_id)
 
 
+@router.post("/chapters/{chapter_id}/documents", response_model=ChapterDocumentOut, status_code=201)
+async def upload_chapter_document(
+    chapter_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify the chapter exists and is owned by the school admin's school
+    await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
+
+    # Upload file to existing S3 storage
+    s3_result = await upload_document(file, folder=f"classecho/chapters/{chapter_id}/documents")
+
+    # Create ChapterDocument record
+    doc = ChapterDocument(
+        chapter_id=chapter_id,
+        file_name=file.filename or "unknown",
+        storage_url=s3_result["url"],
+        file_type=s3_result["file_type"],
+        processing_status="PENDING",
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    # Trigger Celery task
+    from app.tasks.document_tasks import process_chapter_document
+    process_chapter_document.delay(doc.id)
+
+    return doc
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 async def _get_owned_class(class_id: int, school_id: int, db: AsyncSession) -> Class:
     result = await db.execute(select(Class).where(Class.id == class_id))

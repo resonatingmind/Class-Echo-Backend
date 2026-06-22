@@ -5,7 +5,7 @@ celery_app = Celery(
     "scholarmetric",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.llm_tasks"],
+    include=["app.tasks.llm_tasks", "app.tasks.document_tasks"],
 )
 
 celery_app.conf.update(

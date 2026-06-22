@@ -128,6 +128,69 @@ async def upload_image(file: UploadFile, folder: str) -> dict:
         "public_id": key,
     }
 
+async def upload_document(file: UploadFile, folder: str) -> dict:
+    """Upload a chapter document (PDF, DOCX, PPTX, TXT) to S3 and return url + public_id + file_type."""
+    filename = file.filename or ""
+    suffix = os.path.splitext(filename)[-1].lower()
+    
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt"}
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {suffix}. Supported types: PDF, DOCX, PPTX, TXT"
+        )
+        
+    contents = await file.read()
+    file_uuid = uuid.uuid4().hex
+    key = f"{folder}/{file_uuid}{suffix}"
+    
+    # Map extension to Content-Type
+    MIME_TYPES = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".txt": "text/plain",
+    }
+    content_type = MIME_TYPES.get(suffix, "application/octet-stream")
+    
+    try:
+        try:
+            s3_client.put_object(
+                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                Key=key,
+                Body=contents,
+                ContentType=content_type,
+                ACL="public-read"
+            )
+        except Exception:
+            s3_client.put_object(
+                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                Key=key,
+                Body=contents,
+                ContentType=content_type
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Document upload failed: {exc}")
+        
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                "Key": key,
+            },
+            ExpiresIn=604800,  # 7 days
+        )
+    except Exception as exc:
+        print("S3 PRESIGN ERROR:", exc)
+        url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+        
+    return {
+        "url": url,
+        "public_id": key,
+        "file_type": suffix.strip(".").upper(),
+    }
+
 def delete_audio(public_id: str) -> None:
     try:
         s3_client.delete_object(

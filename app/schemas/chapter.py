@@ -22,3 +22,17 @@ class ChapterOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ChapterDocumentOut(BaseModel):
+    id: int
+    chapter_id: int
+    file_name: str
+    storage_url: str
+    file_type: str
+    processing_status: str
+    uploaded_at: datetime
+
+    class Config:
+        from_attributes = True
+
