@@ -17,3 +17,4 @@ class Subject(Base):
     class_: Mapped["Class"] = relationship("Class", back_populates="subjects")
     teacher: Mapped["Teacher | None"] = relationship("Teacher", back_populates="subjects")
     recordings: Mapped[list["Recording"]] = relationship("Recording", back_populates="subject")
+    chapters: Mapped[list["Chapter"]] = relationship("Chapter", back_populates="subject")

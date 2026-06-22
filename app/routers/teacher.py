@@ -9,7 +9,7 @@ from app.models.subject import Subject
 from app.models.recording import Recording
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
-from app.schemas.recording import RecordingWithReport, LLMReportOut
+from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
 from app.schemas.student import StudentOut
 from app.schemas.teacher import TeacherOut, TeacherUpdate
 from app.services.s3_service import upload_audio, upload_image
@@ -141,7 +141,11 @@ async def list_recordings(
     result = await db.execute(
         select(Recording)
         .options(selectinload(Recording.report))
-        .where(Recording.subject_id == subject_id, Recording.teacher_id == teacher.id)
+        .where(
+            Recording.subject_id == subject_id,
+            Recording.teacher_id == teacher.id,
+            Recording.is_archived == False
+        )
         .order_by(Recording.uploaded_at.desc())
     )
     return result.scalars().all()
@@ -244,6 +248,71 @@ async def get_report(
     if not recording.report:
         raise HTTPException(status_code=404, detail="Report not yet available")
     return recording.report
+
+
+@router.patch("/recordings/{recording_id}", response_model=RecordingWithReport)
+async def update_recording(
+    recording_id: int,
+    body: RecordingUpdate,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    result = await db.execute(
+        select(Recording)
+        .options(selectinload(Recording.report))
+        .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
+    )
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(recording, field, value)
+
+    await db.commit()
+    await db.refresh(recording)
+    return recording
+
+
+@router.post("/recordings/{recording_id}/archive", response_model=RecordingWithReport)
+async def archive_recording(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    result = await db.execute(
+        select(Recording)
+        .options(selectinload(Recording.report))
+        .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
+    )
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    recording.is_archived = True
+    await db.commit()
+    await db.refresh(recording)
+    return recording
+
+
+@router.delete("/recordings/{recording_id}", status_code=204)
+async def delete_recording(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    result = await db.execute(
+        select(Recording)
+        .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
+    )
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    await db.delete(recording)
+    await db.commit()
+    return None
+
 
 
 async def _get_teacher_subject(subject_id: int, teacher_id: int, db: AsyncSession) -> Subject:

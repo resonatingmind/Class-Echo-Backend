@@ -9,7 +9,7 @@ class LLMReport(Base):
     __tablename__ = "llm_reports"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    recording_id: Mapped[int] = mapped_column(ForeignKey("recordings.id"), unique=True)
+    recording_id: Mapped[int] = mapped_column(ForeignKey("recordings.id", ondelete="CASCADE"), unique=True)
     overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     teaching_quality_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

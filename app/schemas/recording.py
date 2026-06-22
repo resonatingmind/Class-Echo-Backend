@@ -16,6 +16,7 @@ class RecordingOut(BaseModel):
     duration_seconds: float | None
     status: RecordingStatus
     error_reason: str | None = None
+    is_archived: bool = False
     uploaded_at: datetime
     processed_at: datetime | None
 
@@ -44,3 +45,10 @@ class LLMReportOut(BaseModel):
 
 class RecordingWithReport(RecordingOut):
     report: LLMReportOut | None = None
+
+
+class RecordingUpdate(BaseModel):
+    chapter_name: str | None = None
+    lecture_title: str | None = None
+    description: str | None = None
+

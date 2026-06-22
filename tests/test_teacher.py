@@ -323,16 +323,91 @@ async def test_list_subject_students(client, db_session, teacher_token, subject,
     assert [student["name"] for student in resp.json()] == ["Alpha Student", "Beta Student"]
 
 
-async def test_list_subject_students_for_unowned_subject_returns_404(
-    client, db_session, teacher_token, class_
-):
-    unassigned = Subject(name="History", class_id=class_.id, teacher_id=None)
-    db_session.add(unassigned)
-    await db_session.commit()
-    await db_session.refresh(unassigned)
-
     resp = await client.get(
         f"/teacher/subjects/{unassigned.id}/students",
         headers={"Authorization": teacher_token},
     )
     assert resp.status_code == 404
+
+
+async def test_update_recording_details(client, db_session, teacher_token, subject, teacher_user):
+    recording = Recording(
+        subject_id=subject.id,
+        teacher_id=teacher_user.id,
+        cloudinary_url="https://fake.cloudinary.com/test.mp3",
+        cloudinary_public_id="fake/test-edit",
+        chapter_name="Old Chapter",
+        lecture_title="Old Title",
+        description="Old Description",
+    )
+    db_session.add(recording)
+    await db_session.commit()
+    await db_session.refresh(recording)
+
+    resp = await client.patch(
+        f"/teacher/recordings/{recording.id}",
+        headers={"Authorization": teacher_token},
+        json={
+            "chapter_name": "New Chapter",
+            "lecture_title": "New Title",
+            "description": "New Description",
+        }
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["chapter_name"] == "New Chapter"
+    assert data["lecture_title"] == "New Title"
+    assert data["description"] == "New Description"
+
+
+async def test_archive_recording(client, db_session, teacher_token, subject, teacher_user):
+    recording = Recording(
+        subject_id=subject.id,
+        teacher_id=teacher_user.id,
+        cloudinary_url="https://fake.cloudinary.com/test.mp3",
+        cloudinary_public_id="fake/test-archive",
+        is_archived=False,
+    )
+    db_session.add(recording)
+    await db_session.commit()
+    await db_session.refresh(recording)
+
+    resp = await client.post(
+        f"/teacher/recordings/{recording.id}/archive",
+        headers={"Authorization": teacher_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["is_archived"] is True
+
+    # Ensure it's not showing up on active list
+    list_resp = await client.get(
+        f"/teacher/subjects/{subject.id}/recordings",
+        headers={"Authorization": teacher_token},
+    )
+    assert list_resp.status_code == 200
+    assert recording.id not in [r["id"] for r in list_resp.json()]
+
+
+async def test_delete_recording(client, db_session, teacher_token, subject, teacher_user):
+    recording = Recording(
+        subject_id=subject.id,
+        teacher_id=teacher_user.id,
+        cloudinary_url="https://fake.cloudinary.com/test.mp3",
+        cloudinary_public_id="fake/test-delete",
+    )
+    db_session.add(recording)
+    await db_session.commit()
+    await db_session.refresh(recording)
+
+    resp = await client.delete(
+        f"/teacher/recordings/{recording.id}",
+        headers={"Authorization": teacher_token},
+    )
+    assert resp.status_code == 204
+
+    # Verify it is deleted from DB
+    result = await db_session.execute(
+        select(Recording).where(Recording.id == recording.id)
+    )
+    assert result.scalar_one_or_none() is None
+
