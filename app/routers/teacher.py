@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
+from app.models.chapter import Chapter
+
 from app.database import get_db
 from app.core.deps import get_teacher
 from app.models.subject import Subject
@@ -161,7 +163,13 @@ async def list_recordings(
     await _get_teacher_subject(subject_id, teacher.id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(
             Recording.subject_id == subject_id,
             Recording.teacher_id == teacher.id,
@@ -228,7 +236,13 @@ async def upload_recording(
 
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording.id)
     )
     return result.scalar_one()
@@ -242,7 +256,13 @@ async def retry_recording(
 ):
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
     )
     recording = result.scalar_one_or_none()
@@ -260,7 +280,13 @@ async def retry_recording(
 
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording_id)
     )
     return result.scalar_one()
@@ -274,7 +300,13 @@ async def get_report(
 ):
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
     )
     recording = result.scalar_one_or_none()
@@ -294,7 +326,13 @@ async def update_recording(
 ):
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
     )
     recording = result.scalar_one_or_none()
@@ -317,7 +355,13 @@ async def archive_recording(
 ):
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
     )
     recording = result.scalar_one_or_none()
