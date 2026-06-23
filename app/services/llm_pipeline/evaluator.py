@@ -66,7 +66,31 @@ def _upload_and_wait(client: genai.Client, audio_path: str):
     raise RuntimeError("Timed out waiting for Gemini Files API to process audio.")
 
 
-def _call_gemini(client: genai.Client, file_ref) -> str:
+def _call_gemini(client: genai.Client, file_ref, reference_context: dict | None = None) -> str:
+    prompt = EVALUATION_PROMPT_TEMPLATE
+    if reference_context:
+        summary = reference_context.get("chapter_summary") or "N/A"
+        objectives = ", ".join(reference_context.get("learning_objectives") or []) or "N/A"
+        concepts = ", ".join(reference_context.get("key_concepts") or []) or "N/A"
+        must_cover = ", ".join(reference_context.get("must_cover_topics") or []) or "N/A"
+        
+        chunks_str = ""
+        for idx, c in enumerate(reference_context.get("retrieved_chunks") or []):
+            chunks_str += f"\nChunk {idx+1}:\n{c.get('chunk_text', '')}\n"
+            
+        reference_str = (
+            f"--- REFERENCE CONTEXT (Ground Truth) ---\n"
+            f"Chapter Summary: {summary}\n"
+            f"Learning Objectives: {objectives}\n"
+            f"Key Concepts: {concepts}\n"
+            f"Must Cover Topics: {must_cover}\n"
+            f"Retrieved Reference Material Chunks:{chunks_str}\n"
+            f"--- END REFERENCE CONTEXT ---\n\n"
+            f"Please evaluate the lecture recording against this reference context. Specifically, check if the "
+            f"instructor covered the must-cover topics, aligned with the learning objectives, and stayed conceptually accurate.\n\n"
+        )
+        prompt = reference_str + prompt
+
     for model in [GEMINI_MODEL, FALLBACK_MODEL]:
         try:
             response = client.models.generate_content(
@@ -76,7 +100,7 @@ def _call_gemini(client: genai.Client, file_ref) -> str:
                         file_uri=file_ref.uri,
                         mime_type=file_ref.mime_type,
                     ),
-                    EVALUATION_PROMPT_TEMPLATE,
+                    prompt,
                 ],
             )
             return response.text
@@ -127,7 +151,37 @@ def _validate_and_fix(result: dict) -> dict:
     return result
 
 
-def evaluate(audio_path: str) -> dict:
+def transcribe_audio(audio_path: str) -> str:
+    """Upload audio to Gemini Files API, request transcription, and clean up."""
+    client = _get_client()
+    file_ref = None
+    try:
+        file_ref = _upload_and_wait(client, audio_path)
+        prompt = (
+            "You are an expert transcriber. Transcribe the following audio recording exactly as spoken. "
+            "Do not summarize or omit anything. Capture all content accurately, including any code-switching "
+            "between Hindi and English (Hinglish) or other Indian regional languages."
+        )
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Part.from_uri(
+                    file_uri=file_ref.uri,
+                    mime_type=file_ref.mime_type,
+                ),
+                prompt,
+            ],
+        )
+        return response.text or ""
+    finally:
+        if file_ref is not None:
+            try:
+                client.files.delete(name=file_ref.name)
+            except Exception:
+                pass
+
+
+def evaluate(audio_path: str, reference_context: dict | None = None) -> dict:
     """
     Upload audio_path to Gemini Files API, evaluate the lecture,
     clean up the uploaded file, and return the structured result.
@@ -136,7 +190,7 @@ def evaluate(audio_path: str) -> dict:
     file_ref = None
     try:
         file_ref = _upload_and_wait(client, audio_path)
-        raw = _call_gemini(client, file_ref)
+        raw = _call_gemini(client, file_ref, reference_context)
         parsed = _parse_response(raw)
         return _validate_and_fix(parsed)
     finally:

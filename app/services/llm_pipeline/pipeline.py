@@ -8,7 +8,7 @@ from .evaluator import evaluate
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline(audio_path: str) -> dict:
+def run_pipeline(audio_path: str, reference_context: dict | None = None) -> dict:
     """
     Evaluate a lecture audio file using Gemini's native audio processing.
 
@@ -30,6 +30,6 @@ def run_pipeline(audio_path: str) -> dict:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     logger.info("Uploading audio to Gemini Files API: %s", audio_path)
-    result = evaluate(audio_path)
+    result = evaluate(audio_path, reference_context=reference_context)
     logger.info("Evaluation complete — total score: %d/100", result["total"])
     return result

@@ -20,7 +20,7 @@ def _download_audio(url: str) -> str:
     return tmp_path
 
 
-def analyze_recording(cloudinary_url: str) -> dict:
+def analyze_recording(cloudinary_url: str, reference_context: dict | None = None) -> dict:
     """
     Download a lecture recording from Cloudinary, evaluate with Gemini audio,
     and return results shaped for LLMReport storage.
@@ -37,7 +37,7 @@ def analyze_recording(cloudinary_url: str) -> dict:
     """
     tmp_path = _download_audio(cloudinary_url)
     try:
-        result = run_pipeline(tmp_path)
+        result = run_pipeline(tmp_path, reference_context=reference_context)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

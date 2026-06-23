@@ -35,8 +35,36 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             session.commit()
 
             from app.services.s3_service import sign_url
+            from app.services.llm import _download_audio
+            from app.services.llm_pipeline.evaluator import transcribe_audio
+            from app.services.rag_service import retrieve_chapter_context
+
             fresh_url = sign_url(recording.cloudinary_url) or cloudinary_url
-            report_data = analyze_recording(fresh_url)
+
+            reference_context = None
+            if recording.chapter_id:
+                # If we don't have transcription, transcribe it first
+                if not recording.transcription:
+                    logger.info(f"Recording {recording_id} is missing transcription. Transcribing audio now...")
+                    tmp_audio = _download_audio(fresh_url)
+                    try:
+                        transcript = transcribe_audio(tmp_audio)
+                        recording.transcription = transcript
+                        session.commit()
+                    finally:
+                        if os.path.exists(tmp_audio):
+                            os.remove(tmp_audio)
+
+                # Retrieve chapter context
+                if recording.transcription:
+                    logger.info(f"Retrieving chapter context for chapter {recording.chapter_id}")
+                    reference_context = retrieve_chapter_context(
+                        session=session,
+                        chapter_id=recording.chapter_id,
+                        transcript=recording.transcription
+                    )
+
+            report_data = analyze_recording(fresh_url, reference_context=reference_context)
 
             report = LLMReport(
                 recording_id=recording_id,

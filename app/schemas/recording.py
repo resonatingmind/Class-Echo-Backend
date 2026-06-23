@@ -7,6 +7,7 @@ from app.services.s3_service import sign_url
 class RecordingOut(BaseModel):
     id: int
     subject_id: int
+    chapter_id: int | None = None
     teacher_id: int
     chapter_name: str | None
     lecture_title: str | None = None
@@ -48,6 +49,7 @@ class RecordingWithReport(RecordingOut):
 
 
 class RecordingUpdate(BaseModel):
+    chapter_id: int | None = None
     chapter_name: str | None = None
     lecture_title: str | None = None
     description: str | None = None

@@ -155,6 +155,7 @@ async def list_recordings(
 async def upload_recording(
     subject_id: int,
     file: UploadFile = File(...),
+    chapter_id: int | None = Form(None),
     chapter_name: str | None = Form(None),
     lecture_title: str | None = Form(None),
     description: str | None = Form(None),
@@ -176,6 +177,7 @@ async def upload_recording(
 
     recording = Recording(
         subject_id=subject_id,
+        chapter_id=chapter_id,
         teacher_id=teacher.id,
         chapter_name=chapter_name or None,
         lecture_title=lecture_title or None,
