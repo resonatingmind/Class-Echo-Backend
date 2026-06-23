@@ -466,6 +466,45 @@ async def upload_chapter_document(
     return doc
 
 
+@router.get("/chapters/{chapter_id}/documents", response_model=list[ChapterDocumentOut])
+async def list_chapter_documents(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify ownership of the chapter
+    await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
+    
+    result = await db.execute(
+        select(ChapterDocument)
+        .where(ChapterDocument.chapter_id == chapter_id)
+        .order_by(ChapterDocument.uploaded_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.delete("/chapters/documents/{document_id}", status_code=204)
+async def delete_chapter_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Retrieve the document with ownership validation
+    result = await db.execute(
+        select(ChapterDocument)
+        .join(Chapter, ChapterDocument.chapter_id == Chapter.id)
+        .join(Subject, Chapter.subject_id == Subject.id)
+        .join(Class, Subject.class_id == Class.id)
+        .where(ChapterDocument.id == document_id, Class.school_id == school_admin.school_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    await db.delete(doc)
+    await db.commit()
+
+
 @router.get("/chapters/{chapter_id}/knowledge", response_model=ChapterKnowledgeOut)
 async def get_chapter_knowledge(
     chapter_id: int,
