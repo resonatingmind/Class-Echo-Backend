@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from app.models.chapter import Chapter
 from app.models.subject import Subject
 from app.models.class_ import Class
@@ -22,6 +23,7 @@ async def get_owned_subject(db: AsyncSession, subject_id: int, school_id: int) -
 async def get_owned_chapter(db: AsyncSession, chapter_id: int, school_id: int) -> Chapter:
     result = await db.execute(
         select(Chapter)
+        .options(selectinload(Chapter.documents))
         .join(Subject, Chapter.subject_id == Subject.id)
         .join(Class, Subject.class_id == Class.id)
         .where(Chapter.id == chapter_id, Class.school_id == school_id)
@@ -55,6 +57,7 @@ async def list_chapters(
     
     result = await db.execute(
         select(Chapter)
+        .options(selectinload(Chapter.documents))
         .where(Chapter.subject_id == subject_id)
         .order_by(Chapter.created_at.asc())
     )

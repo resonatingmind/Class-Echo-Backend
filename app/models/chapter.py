@@ -23,3 +23,11 @@ class Chapter(Base):
     knowledge: Mapped["ChapterKnowledge | None"] = relationship(
         "ChapterKnowledge", back_populates="chapter", uselist=False, cascade="all, delete-orphan"
     )
+
+    @property
+    def document_count(self) -> int:
+        try:
+            return len(self.documents)
+        except Exception:
+            return 0
+
