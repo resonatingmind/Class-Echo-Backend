@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -24,11 +24,33 @@ ROLE_MODELS = [
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(request: Request, db: AsyncSession = Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    email = None
+    password = None
+
+    if "application/x-www-form-urlencoded" in content_type:
+        form_data = await request.form()
+        email = form_data.get("username")
+        password = form_data.get("password")
+    else:
+        try:
+            json_data = await request.json()
+            email = json_data.get("email") or json_data.get("username")
+            password = json_data.get("password")
+        except Exception:
+            pass
+
+    if not email or not password:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Missing email/username or password",
+        )
+
     for role, Model in ROLE_MODELS:
-        result = await db.execute(select(Model).where(Model.email == form_data.username))
+        result = await db.execute(select(Model).where(Model.email == email))
         user = result.scalar_one_or_none()
-        if user and verify_password(form_data.password, user.hashed_password):
+        if user and verify_password(password, user.hashed_password):
             token_data = {"sub": str(user.id), "role": role}
             if role == "school_admin":
                 token_data["school_id"] = user.school_id

@@ -64,6 +64,11 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                         transcript=recording.transcription
                     )
 
+            if reference_context is None:
+                reference_context = {}
+            if recording.transcription:
+                reference_context["transcript"] = recording.transcription
+
             report_data = analyze_recording(fresh_url, reference_context=reference_context)
 
             report = LLMReport(

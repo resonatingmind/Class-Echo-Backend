@@ -17,60 +17,95 @@ SCORE_WEIGHTS: dict[str, int] = {
 
 assert sum(SCORE_WEIGHTS.values()) == 100, "Weights must sum to 100"
 
-# ── LLM evaluation prompt (injected with audio file at runtime) ───────────────
+# ── LLM evaluation prompt (injected with context at runtime) ───────────────
 EVALUATION_PROMPT_TEMPLATE = """
-You are an expert educational evaluator analyzing a lecture recording.
+You are an expert educational evaluator analyzing a lecture transcript against the RAG reference context.
 
-Listen to the complete audio carefully. The lecture may contain Hindi-English code-switching, regional Indian languages, or other multilingual mixing — evaluate the content as-is, understanding all languages present.
+Evaluate the transcript carefully. The lecture may contain Hindi-English code-switching, regional Indian languages, or other multilingual mixing — evaluate the content as-is, understanding all languages present.
 
-## Evaluation Dimensions
+--- INPUTS ---
+[Lecture Transcript]
+{transcript}
 
-Score each dimension strictly and with specific evidence. For every dimension provide:
+--- RAG REFERENCE CONTEXT ---
+Chapter Summary: {chapter_summary}
+Learning Objectives: {learning_objectives}
+Key Concepts / Must-Cover Concepts: {key_concepts}
+Must-Cover Topics: {must_cover_topics}
+
+Retrieved Reference Chunks:
+{retrieved_chunks}
+--------------
+
+Please evaluate the lecture transcript against this reference context.
+
+## Evaluation Dimensions & Scoring Rules
+
+Score each dimension strictly and provide:
 - A score within the stated maximum
 - One precise finding sentence (what you observed, not generic)
-- 2–3 short evidence quotes with approximate timestamps (format: "~MM:SS — '...'")
+- 2–3 short evidence quotes from the transcript (format: "finding text... 'quote'")
 
-| Dimension                | Max | What to evaluate |
-|--------------------------|-----|------------------|
-| verbal_clarity           | 20  | Pronunciation, sentence completion, filler words (um/uh/basically/you know), articulation |
-| pacing_delivery          | 15  | Speaking rate (words per minute), variation, purposeful pauses, energy and tone |
-| content_structure        | 15  | Clear introduction, logical progression, topic transitions, organized flow |
-| conceptual_depth         | 20  | Technical accuracy, use of examples/analogies, scaffolding from simple to complex |
-| student_engagement       | 15  | Questions directed at students, checks for understanding, wait time, interactive cues |
-| language_accessibility   | 10  | Effectiveness of code-switching, jargon explained, all students can follow |
-| closure_recap            |  5  | Key points summarized at end, takeaways stated clearly |
+| Dimension | Max | Scoring Rules & Criteria |
+|---|---|---|
+| verbal_clarity | 20 | Pronunciation, sentence completion, filler words (um/uh/basically/you know), articulation, and verbal flow based on transcript. |
+| pacing_delivery | 15 | Estimated speaking rate, pacing transitions, variation, structured pauses, and rhetorical delivery. |
+| content_structure | 15 | Progression against chapter objectives, logical sequencing of topics, transitions, and introduction. |
+| conceptual_depth | 20 | Correctness vs reference, curriculum coverage, explanation quality, and examples/analogies used to scaffold complex ideas. |
+| student_engagement | 15 | Questions directed at students, checks for understanding, wait time, and conversational cues. |
+| language_accessibility | 10 | Clarity of explanation, effectiveness of code-switching (if any), explaining technical jargon. |
+| closure_recap | 5 | Summarizing key points at the end of the lecture and defining clear takeaways. |
+
+## Curriculum Coverage & Accuracy Analysis
+Additionally, perform a curriculum coverage and technical accuracy analysis:
+1. curriculum_coverage:
+   - Identify which key concepts and must-cover concepts from reference context were covered.
+   - Identify which key concepts and must-cover concepts from reference context were missed.
+   - Compute the coverage percentage (covered_concepts / total_concepts * 100).
+2. accuracy_analysis:
+   - Identify correct and clear explanations from the transcript.
+   - Identify any potential inaccuracies or misconceptions compared to the RAG reference context.
 
 ## Quantitative Estimates
-Estimate from listening to the audio:
+Estimate from the transcript:
 - wpm_estimate: approximate words per minute (integer)
-- filler_words_heard: total count of filler words heard (um, uh, basically, you know, sort of, etc.)
+- filler_words_heard: total count of filler words heard in the transcript (um, uh, basically, you know, sort of, etc.)
 - questions_asked: number of questions directed at students
-- languages_detected: list of language names heard (e.g. ["Hindi", "English"])
+- languages_detected: list of language names heard/used (e.g. ["Hindi", "English"])
 - code_switching_frequency: "none" | "low" | "medium" | "high"
 
 ## Output Format
-Respond ONLY with valid JSON. No markdown fences, no prose outside the object.
+Respond ONLY with a valid JSON object. Do not wrap the JSON in markdown formatting (like ```json), do not include any explanatory prose before or after the JSON.
 
-{
-  "scores": {
-    "verbal_clarity":         { "score": <int 0-20>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "pacing_delivery":        { "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "content_structure":      { "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "conceptual_depth":       { "score": <int 0-20>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "student_engagement":     { "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "language_accessibility": { "score": <int 0-10>, "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>", "<~MM:SS — quote>"] },
-    "closure_recap":          { "score": <int 0-5>,  "finding": "<one specific sentence>", "evidence": ["<~MM:SS — quote>"] }
-  },
+{{
+  "scores": {{
+    "verbal_clarity":         {{ "score": <int 0-20>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "pacing_delivery":        {{ "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "content_structure":      {{ "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "conceptual_depth":       {{ "score": <int 0-20>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "student_engagement":     {{ "score": <int 0-15>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "language_accessibility": {{ "score": <int 0-10>, "finding": "<one specific sentence>", "evidence": ["<quote 1>", "<quote 2>"] }},
+    "closure_recap":          {{ "score": <int 0-5>,  "finding": "<one specific sentence>", "evidence": ["<quote 1>"] }}
+  }},
   "total": <int 0-100>,
-  "quantitative": {
+  "quantitative": {{
     "wpm_estimate": <int>,
     "filler_words_heard": <int>,
     "questions_asked": <int>,
     "languages_detected": ["<language>"],
     "code_switching_frequency": "<none|low|medium|high>"
-  },
+  }},
   "overall_notes": "<2-3 sentence overall assessment of teaching effectiveness>",
   "top_strengths": ["<specific strength 1>", "<specific strength 2>"],
-  "priority_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"]
-}
-""".strip()
+  "priority_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"],
+  "curriculum_coverage": {{
+    "covered_concepts": [<list of covered concepts>],
+    "missing_concepts": [<list of missed concepts>],
+    "coverage_percentage": <float or int 0-100>
+  }},
+  "accuracy_analysis": {{
+    "correct_explanations": [<list of correct explanation descriptions or quotes>],
+    "potential_inaccuracies": [<list of potential inaccuracies or misconceptions found>]
+  }}
+}}
+""".strip().strip()

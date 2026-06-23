@@ -117,17 +117,20 @@ async def test_student_signup_bad_school(client, class_):
     assert resp.status_code == 404
 
 
-async def test_student_signup_class_wrong_school(client, school, class_, db_session):
+async def test_student_signup_class_wrong_school(client, school, class_):
     """
     Signing up with a class that doesn't belong to the given school returns 404.
     We create a second school and try to use class_ (from the first school) with it.
     """
     from app.models.school import School
+    from app.database import AsyncSessionLocal
 
-    other_school = School(name="Other School")
-    db_session.add(other_school)
-    await db_session.commit()
-    await db_session.refresh(other_school)
+    async with AsyncSessionLocal() as session:
+        other_school = School(name="Other School")
+        session.add(other_school)
+        await session.commit()
+        await session.refresh(other_school)
+        other_school_id = other_school.id
 
     resp = await client.post(
         "/auth/student/signup",
@@ -135,7 +138,7 @@ async def test_student_signup_class_wrong_school(client, school, class_, db_sess
             "name": "Student",
             "email": "s3@test.com",
             "password": "pass",
-            "school_id": other_school.id,
+            "school_id": other_school_id,
             "class_id": class_.id,  # belongs to `school`, not `other_school`
         },
     )

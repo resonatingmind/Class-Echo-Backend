@@ -66,42 +66,48 @@ def _upload_and_wait(client: genai.Client, audio_path: str):
     raise RuntimeError("Timed out waiting for Gemini Files API to process audio.")
 
 
-def _call_gemini(client: genai.Client, file_ref, reference_context: dict | None = None) -> str:
-    prompt = EVALUATION_PROMPT_TEMPLATE
-    if reference_context:
-        summary = reference_context.get("chapter_summary") or "N/A"
-        objectives = ", ".join(reference_context.get("learning_objectives") or []) or "N/A"
-        concepts = ", ".join(reference_context.get("key_concepts") or []) or "N/A"
-        must_cover = ", ".join(reference_context.get("must_cover_topics") or []) or "N/A"
-        
-        chunks_str = ""
-        for idx, c in enumerate(reference_context.get("retrieved_chunks") or []):
-            chunks_str += f"\nChunk {idx+1}:\n{c.get('chunk_text', '')}\n"
-            
-        reference_str = (
-            f"--- REFERENCE CONTEXT (Ground Truth) ---\n"
-            f"Chapter Summary: {summary}\n"
-            f"Learning Objectives: {objectives}\n"
-            f"Key Concepts: {concepts}\n"
-            f"Must Cover Topics: {must_cover}\n"
-            f"Retrieved Reference Material Chunks:{chunks_str}\n"
-            f"--- END REFERENCE CONTEXT ---\n\n"
-            f"Please evaluate the lecture recording against this reference context. Specifically, check if the "
-            f"instructor covered the must-cover topics, aligned with the learning objectives, and stayed conceptually accurate.\n\n"
-        )
-        prompt = reference_str + prompt
+def _call_gemini(client: genai.Client, reference_context: dict | None = None) -> str:
+    if not reference_context:
+        reference_context = {}
+
+    transcript = reference_context.get("transcript") or "N/A"
+    summary = reference_context.get("chapter_summary") or "N/A"
+    
+    objectives_list = reference_context.get("learning_objectives") or []
+    objectives = ", ".join(objectives_list) if isinstance(objectives_list, list) else str(objectives_list)
+    if not objectives:
+        objectives = "N/A"
+
+    concepts_list = reference_context.get("key_concepts") or []
+    concepts = ", ".join(concepts_list) if isinstance(concepts_list, list) else str(concepts_list)
+    if not concepts:
+        concepts = "N/A"
+
+    must_cover_list = reference_context.get("must_cover_topics") or []
+    must_cover = ", ".join(must_cover_list) if isinstance(must_cover_list, list) else str(must_cover_list)
+    if not must_cover:
+        must_cover = "N/A"
+
+    chunks_str = ""
+    for idx, c in enumerate(reference_context.get("retrieved_chunks") or []):
+        chunks_str += f"\nChunk {idx+1}:\n{c.get('chunk_text', '')}\n"
+    if not chunks_str:
+        chunks_str = "No reference material chunks retrieved."
+
+    prompt = EVALUATION_PROMPT_TEMPLATE.format(
+        transcript=transcript,
+        chapter_summary=summary,
+        learning_objectives=objectives,
+        key_concepts=concepts,
+        must_cover_topics=must_cover,
+        retrieved_chunks=chunks_str
+    )
 
     for model in [GEMINI_MODEL, FALLBACK_MODEL]:
         try:
             response = client.models.generate_content(
                 model=model,
-                contents=[
-                    types.Part.from_uri(
-                        file_uri=file_ref.uri,
-                        mime_type=file_ref.mime_type,
-                    ),
-                    prompt,
-                ],
+                contents=prompt,
             )
             return response.text
         except genai_errors.ServerError:
@@ -148,6 +154,16 @@ def _validate_and_fix(result: dict) -> dict:
     result["top_strengths"] = [str(s) for s in result.get("top_strengths", [])]
     result["priority_improvements"] = [str(s) for s in result.get("priority_improvements", [])]
 
+    # Handle curriculum_coverage and accuracy_analysis
+    cc = result.setdefault("curriculum_coverage", {})
+    cc.setdefault("covered_concepts", [])
+    cc.setdefault("missing_concepts", [])
+    cc.setdefault("coverage_percentage", 0.0)
+
+    aa = result.setdefault("accuracy_analysis", {})
+    aa.setdefault("correct_explanations", [])
+    aa.setdefault("potential_inaccuracies", [])
+
     return result
 
 
@@ -183,19 +199,16 @@ def transcribe_audio(audio_path: str) -> str:
 
 def evaluate(audio_path: str, reference_context: dict | None = None) -> dict:
     """
-    Upload audio_path to Gemini Files API, evaluate the lecture,
-    clean up the uploaded file, and return the structured result.
+    Evaluate the lecture transcript and reference context using Gemini.
     """
     client = _get_client()
-    file_ref = None
-    try:
-        file_ref = _upload_and_wait(client, audio_path)
-        raw = _call_gemini(client, file_ref, reference_context)
-        parsed = _parse_response(raw)
-        return _validate_and_fix(parsed)
-    finally:
-        if file_ref is not None:
-            try:
-                client.files.delete(name=file_ref.name)
-            except Exception:
-                pass
+    if not reference_context:
+        reference_context = {}
+
+    if not reference_context.get("transcript"):
+        logger.info("Transcript not found in reference_context. Transcribing audio first...")
+        reference_context["transcript"] = transcribe_audio(audio_path)
+
+    raw = _call_gemini(client, reference_context)
+    parsed = _parse_response(raw)
+    return _validate_and_fix(parsed)
