@@ -20,7 +20,7 @@ from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, Assign
 from app.schemas.teacher import TeacherCreate, TeacherOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
-from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut
+from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut, ChapterKnowledgeOut
 from app.core.security import hash_password
 from app.services.s3_service import upload_image, upload_document
 from app.services import chapter_service
@@ -464,6 +464,40 @@ async def upload_chapter_document(
     process_chapter_document.delay(doc.id)
 
     return doc
+
+
+@router.get("/chapters/{chapter_id}/knowledge", response_model=ChapterKnowledgeOut)
+async def get_chapter_knowledge(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify ownership
+    await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
+
+    from app.services import chapter_knowledge_service
+    knowledge = await chapter_knowledge_service.get_chapter_knowledge(db, chapter_id)
+    if not knowledge:
+        raise HTTPException(
+            status_code=404,
+            detail="Chapter knowledge profile has not been generated yet. Please upload and process documents first."
+        )
+    return knowledge
+
+
+@router.post("/chapters/{chapter_id}/knowledge/regenerate", status_code=202)
+async def regenerate_chapter_knowledge(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify ownership
+    await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
+
+    from app.tasks.document_tasks import generate_chapter_knowledge_task
+    generate_chapter_knowledge_task.delay(chapter_id)
+    return {"message": "Chapter knowledge generation task started."}
+
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

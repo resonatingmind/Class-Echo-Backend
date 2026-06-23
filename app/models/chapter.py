@@ -20,3 +20,6 @@ class Chapter(Base):
     documents: Mapped[list["ChapterDocument"]] = relationship("ChapterDocument", back_populates="chapter")
     chunks: Mapped[list["ChapterChunk"]] = relationship("ChapterChunk", back_populates="chapter")
     recordings: Mapped[list["Recording"]] = relationship("Recording", back_populates="chapter")
+    knowledge: Mapped["ChapterKnowledge | None"] = relationship(
+        "ChapterKnowledge", back_populates="chapter", uselist=False, cascade="all, delete-orphan"
+    )

@@ -123,6 +123,9 @@ def process_chapter_document(self, document_id: int):
             session.commit()
             logger.info(f"Successfully processed document {document_id}")
 
+            # Trigger Chapter Knowledge profile generation task
+            generate_chapter_knowledge_task.delay(doc.chapter_id)
+
     except Exception as exc:
         logger.error(
             "Document %d processing failed (attempt %d/%d): %s",
@@ -160,3 +163,33 @@ def process_chapter_document(self, document_id: int):
                 os.remove(tmp_path)
             except Exception as e:
                 logger.warning(f"Could not remove temp file {tmp_path}: {e}")
+
+
+@celery_app.task(bind=True, max_retries=3)
+def generate_chapter_knowledge_task(self, chapter_id: int):
+    """
+    Celery task to generate or update the ChapterKnowledge profile for a chapter.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.config import settings
+    from app.services.chapter_knowledge_service import generate_chapter_knowledge
+
+    db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+    engine = create_engine(db_url)
+    Session = sessionmaker(bind=engine)
+
+    try:
+        with Session() as session:
+            generate_chapter_knowledge(session, chapter_id)
+    except Exception as exc:
+        logger.error(
+            "ChapterKnowledge generation for chapter %d failed (attempt %d/%d): %s",
+            chapter_id,
+            self.request.retries + 1,
+            self.max_retries + 1,
+            exc,
+            exc_info=True,
+        )
+        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+

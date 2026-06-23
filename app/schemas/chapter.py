@@ -36,3 +36,17 @@ class ChapterDocumentOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+class ChapterKnowledgeOut(BaseModel):
+    chapter_id: int
+    chapter_summary: str
+    learning_objectives: list[str]
+    key_concepts: list[str]
+    must_cover_topics: list[str]
+    common_misconceptions: list[str]
+    generated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+

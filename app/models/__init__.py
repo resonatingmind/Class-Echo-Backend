@@ -10,9 +10,10 @@ from app.models.llm_report import LLMReport
 from app.models.chapter import Chapter
 from app.models.chapter_document import ChapterDocument
 from app.models.chapter_chunk import ChapterChunk
+from app.models.chapter_knowledge import ChapterKnowledge
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
     "Teacher", "Student", "Recording", "RecordingStatus", "LLMReport",
-    "Chapter", "ChapterDocument", "ChapterChunk",
+    "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
 ]
