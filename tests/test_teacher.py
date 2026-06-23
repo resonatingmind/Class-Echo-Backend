@@ -93,16 +93,23 @@ async def test_list_recordings_empty(client, teacher_token, subject):
     assert resp.json() == []
 
 
-async def test_upload_recording(client, teacher_token, subject, audio_bytes):
+async def test_upload_recording(client, db_session, teacher_token, subject, audio_bytes):
     """
     Upload a real WAV file → Cloudinary stores it, Celery (eager) processes it.
     Response status is 'pending' (captured before Celery runs in the route).
     The Cloudinary URL should be a real https:// URL.
     """
+    from app.models.chapter import Chapter
+    chapter = Chapter(name="Test Chapter", subject_id=subject.id)
+    db_session.add(chapter)
+    await db_session.commit()
+    await db_session.refresh(chapter)
+
     resp = await client.post(
         f"/teacher/subjects/{subject.id}/recordings",
         headers={"Authorization": teacher_token},
         files={"file": ("test_audio.wav", audio_bytes, "audio/wav")},
+        data={"chapter_id": str(chapter.id)},
     )
     assert resp.status_code == 201
     data = resp.json()
@@ -117,10 +124,17 @@ async def test_upload_creates_llm_report(client, db_session, teacher_token, subj
     After upload, the Celery task (eager) runs and creates an LLMReport.
     Requires GEMINI_API_KEY and a working Gemini/Cloudinary path.
     """
+    from app.models.chapter import Chapter
+    chapter = Chapter(name="Test Chapter", subject_id=subject.id)
+    db_session.add(chapter)
+    await db_session.commit()
+    await db_session.refresh(chapter)
+
     resp = await client.post(
         f"/teacher/subjects/{subject.id}/recordings",
         headers={"Authorization": teacher_token},
         files={"file": ("test_audio.wav", audio_bytes, "audio/wav")},
+        data={"chapter_id": str(chapter.id)},
     )
     assert resp.status_code == 201
     recording_id = resp.json()["id"]
@@ -143,12 +157,19 @@ async def test_upload_creates_llm_report(client, db_session, teacher_token, subj
     assert recording.processed_at is not None
 
 
-async def test_upload_invalid_mime_type(client, teacher_token, subject):
+async def test_upload_invalid_mime_type(client, db_session, teacher_token, subject):
     """Uploading a non-audio file (text/plain) should return 400."""
+    from app.models.chapter import Chapter
+    chapter = Chapter(name="Test Chapter", subject_id=subject.id)
+    db_session.add(chapter)
+    await db_session.commit()
+    await db_session.refresh(chapter)
+
     resp = await client.post(
         f"/teacher/subjects/{subject.id}/recordings",
         headers={"Authorization": teacher_token},
         files={"file": ("notes.txt", b"this is not audio", "text/plain")},
+        data={"chapter_id": str(chapter.id)},
     )
     assert resp.status_code == 400
 
@@ -164,6 +185,7 @@ async def test_upload_to_unassigned_subject(client, db_session, teacher_token, c
         f"/teacher/subjects/{unassigned.id}/recordings",
         headers={"Authorization": teacher_token},
         files={"file": ("test.wav", audio_bytes, "audio/wav")},
+        data={"chapter_id": "999"},
     )
     assert resp.status_code == 404
 

@@ -12,6 +12,7 @@ from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
 from app.schemas.student import StudentOut
 from app.schemas.teacher import TeacherOut, TeacherUpdate
+from app.schemas.chapter import ChapterOut
 from app.services.s3_service import upload_audio, upload_image
 from app.tasks.llm_tasks import process_recording
 
@@ -131,6 +132,26 @@ async def get_my_subject(
     return subject
 
 
+@router.get("/subjects/{subject_id}/chapters", response_model=list[ChapterOut])
+async def list_subject_chapters(
+    subject_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    from app.models.chapter import Chapter
+    from app.schemas.chapter import ChapterOut
+    
+    await _get_teacher_subject(subject_id, teacher.id, db)
+    
+    result = await db.execute(
+        select(Chapter)
+        .options(selectinload(Chapter.documents))
+        .where(Chapter.subject_id == subject_id)
+        .order_by(Chapter.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
 @router.get("/subjects/{subject_id}/recordings", response_model=list[RecordingWithReport])
 async def list_recordings(
     subject_id: int,
@@ -155,8 +176,7 @@ async def list_recordings(
 async def upload_recording(
     subject_id: int,
     file: UploadFile = File(...),
-    chapter_id: int | None = Form(None),
-    chapter_name: str | None = Form(None),
+    chapter_id: int = Form(...),
     lecture_title: str | None = Form(None),
     description: str | None = Form(None),
     transcription: str | None = Form(None),
@@ -164,7 +184,20 @@ async def upload_recording(
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_teacher),
 ):
+    from app.models.chapter import Chapter
+
     await _get_teacher_subject(subject_id, teacher.id, db)
+
+    # Validate chapter exists and belongs to the subject
+    res = await db.execute(
+        select(Chapter).where(Chapter.id == chapter_id, Chapter.subject_id == subject_id)
+    )
+    chapter_obj = res.scalar_one_or_none()
+    if not chapter_obj:
+        raise HTTPException(
+            status_code=404,
+            detail="Chapter not found or does not belong to this subject"
+        )
 
     mime = _resolve_mime(file)
     if mime not in ALLOWED_AUDIO_TYPES:
@@ -179,7 +212,7 @@ async def upload_recording(
         subject_id=subject_id,
         chapter_id=chapter_id,
         teacher_id=teacher.id,
-        chapter_name=chapter_name or None,
+        chapter_name=chapter_obj.name,
         lecture_title=lecture_title or None,
         description=description or None,
         transcription=transcription or None,
