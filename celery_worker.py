@@ -1,0 +1,19 @@
+from celery import Celery
+from app.config import settings
+
+celery_app = Celery(
+    "scholarmetric",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
+    include=["app.tasks.llm_tasks", "app.tasks.document_tasks"],
+)
+
+celery_app.conf.update(
+    worker_concurrency=2,
+    broker_connection_retry_on_startup=True,
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    timezone="UTC",
+    enable_utc=True,
+)

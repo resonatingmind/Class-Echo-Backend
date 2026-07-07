@@ -1,0 +1,497 @@
+"""
+Tests for School Admin routes (/school/...).
+
+What these tests cover:
+- CRUD on classes (scoped to own school only)
+- CRUD on subjects + teacher assignment
+- Teacher creation and listing
+- Read-only access to recordings and reports
+- Ownership enforcement: cannot touch another school's data
+- Role guard: only 'school_admin' role can access
+"""
+import app.routers.school_admin as school_admin_router
+
+from sqlalchemy import select
+
+from app.models.class_ import Class
+from app.models.school import School
+from app.models.school_admin import SchoolAdmin
+from app.models.student import Student
+from app.models.subject import Subject
+from app.models.chapter import Chapter
+
+
+# ── Authorization ─────────────────────────────────────────────────────────────
+
+async def test_unauthorized_no_token(client):
+    resp = await client.get("/school/classes")
+    assert resp.status_code == 401
+
+
+async def test_unauthorized_wrong_role(client, student_token, student_user):
+    resp = await client.get("/school/classes", headers={"Authorization": student_token})
+    assert resp.status_code == 403
+
+
+# ── Classes ───────────────────────────────────────────────────────────────────
+
+async def test_list_classes(client, school_admin_token, school_admin_user, class_):
+    resp = await client.get("/school/classes", headers={"Authorization": school_admin_token})
+    assert resp.status_code == 200
+    ids = [c["id"] for c in resp.json()]
+    assert class_.id in ids
+
+
+async def test_list_classes_empty(client, school_admin_token, school_admin_user):
+    """No classes yet → empty list (not an error)."""
+    resp = await client.get("/school/classes", headers={"Authorization": school_admin_token})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_create_class(client, school_admin_token, school_admin_user):
+    resp = await client.post(
+        "/school/classes",
+        json={"name": "Class 7B"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Class 7B"
+    assert data["school_id"] == school_admin_user.school_id
+
+
+async def test_update_class(client, school_admin_token, class_):
+    resp = await client.put(
+        f"/school/classes/{class_.id}",
+        json={"name": "Updated Class Name"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Updated Class Name"
+
+
+async def test_delete_class(client, db_session, school_admin_token, school_admin_user):
+    # Create a class to delete (don't reuse the shared fixture — it would break other tests)
+    new_class = Class(name="Temporary Class", school_id=school_admin_user.school_id)
+    db_session.add(new_class)
+    await db_session.commit()
+    await db_session.refresh(new_class)
+
+    resp = await client.delete(
+        f"/school/classes/{new_class.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 204
+
+
+async def test_get_class_from_other_school(client, db_session, school_admin_token):
+    """
+    School admin A should get 404 when trying to access a class from school B.
+    """
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    await db_session.commit()
+    await db_session.refresh(other_school)
+
+    other_class = Class(name="Class in Other School", school_id=other_school.id)
+    db_session.add(other_class)
+    await db_session.commit()
+    await db_session.refresh(other_class)
+
+    resp = await client.get(
+        f"/school/classes/{other_class.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 404
+
+
+# ── Subjects ──────────────────────────────────────────────────────────────────
+
+async def test_list_subjects_empty(client, school_admin_token, class_):
+    resp = await client.get(
+        f"/school/classes/{class_.id}/subjects",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_create_subject(client, school_admin_token, class_):
+    resp = await client.post(
+        f"/school/classes/{class_.id}/subjects",
+        json={"name": "Science"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Science"
+    assert data["teacher_id"] is None  # no teacher assigned yet
+
+
+async def test_list_subjects_with_teacher(client, school_admin_token, subject, class_):
+    """After assigning a teacher, the subject response includes teacher details."""
+    resp = await client.get(
+        f"/school/classes/{class_.id}/subjects",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    subjects = resp.json()
+    assert any(s["id"] == subject.id for s in subjects)
+    math = next(s for s in subjects if s["id"] == subject.id)
+    assert math["teacher"] is not None
+    assert math["teacher"]["id"] == subject.teacher_id
+
+
+async def test_update_subject(client, school_admin_token, subject):
+    resp = await client.put(
+        f"/school/subjects/{subject.id}",
+        json={"name": "Advanced Mathematics"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Advanced Mathematics"
+
+
+async def test_assign_teacher_to_subject(client, db_session, school_admin_token, class_, school_admin_user):
+    """Create a new subject without a teacher, then assign one."""
+    from app.models.teacher import Teacher
+    from app.core.security import hash_password
+
+    # Create a second teacher to assign
+    new_teacher = Teacher(
+        name="New Teacher",
+        email="newteacher@test.com",
+        hashed_password=hash_password("pass"),
+    )
+    db_session.add(new_teacher)
+
+    # Create subject with no teacher
+    sub = Subject(name="History", class_id=class_.id)
+    db_session.add(sub)
+    await db_session.commit()
+    await db_session.refresh(new_teacher)
+    await db_session.refresh(sub)
+
+    resp = await client.put(
+        f"/school/subjects/{sub.id}/assign-teacher",
+        json={"teacher_id": new_teacher.id},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["teacher_id"] == new_teacher.id
+
+
+async def test_assign_nonexistent_teacher(client, school_admin_token, subject):
+    resp = await client.put(
+        f"/school/subjects/{subject.id}/assign-teacher",
+        json={"teacher_id": 99999},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 404
+
+
+# ── Teachers ──────────────────────────────────────────────────────────────────
+
+async def test_create_teacher(client, school_admin_token, school_admin_user):
+    resp = await client.post(
+        "/school/teachers",
+        json={
+            "name": "Ms. Sharma",
+            "email": "sharma@school.com",
+            "password": "password123",
+        },
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["email"] == "sharma@school.com"
+    assert "hashed_password" not in data  # never exposed in response
+
+
+async def test_create_teacher_duplicate_email(client, school_admin_token, teacher_user):
+    resp = await client.post(
+        "/school/teachers",
+        json={
+            "name": "Another Teacher",
+            "email": teacher_user.email,  # already registered
+            "password": "password123",
+        },
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 409
+
+
+async def test_list_teachers(client, school_admin_token, teacher_user):
+    resp = await client.get("/school/teachers", headers={"Authorization": school_admin_token})
+    assert resp.status_code == 200
+    emails = [t["email"] for t in resp.json()]
+    assert teacher_user.email in emails
+
+
+async def test_get_my_profile(client, school_admin_token, school_admin_user, school):
+    resp = await client.get("/school/me", headers={"Authorization": school_admin_token})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["email"] == school_admin_user.email
+    assert data["school_name"] == school.name
+
+
+async def test_update_my_profile(client, school_admin_token):
+    resp = await client.put(
+        "/school/me",
+        json={"name": "Updated School Admin"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Updated School Admin"
+
+
+async def test_upload_school_admin_profile_image(client, school_admin_token, monkeypatch):
+    async def fake_upload_image(file, folder):
+        return {"url": "https://example.com/admin.png", "public_id": "admins/test"}
+
+    monkeypatch.setattr(school_admin_router, "upload_image", fake_upload_image)
+
+    resp = await client.post(
+        "/school/profile-image",
+        headers={"Authorization": school_admin_token},
+        files={"file": ("avatar.png", b"fake-image", "image/png")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["profile_pic_url"] == "https://example.com/admin.png"
+
+
+async def test_upload_school_logo(client, school_admin_token, monkeypatch):
+    async def fake_upload_image(file, folder):
+        return {"url": "https://example.com/logo.png", "public_id": "schools/test"}
+
+    monkeypatch.setattr(school_admin_router, "upload_image", fake_upload_image)
+
+    resp = await client.post(
+        "/school/logo",
+        headers={"Authorization": school_admin_token},
+        files={"file": ("logo.png", b"fake-image", "image/png")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["logo_url"] == "https://example.com/logo.png"
+
+
+async def test_list_subject_students(client, db_session, school_admin_token, school, class_, subject):
+    student_a = Student(
+        name="Beta Student",
+        email="schoolbeta@student.com",
+        hashed_password="x",
+        school_id=school.id,
+        class_id=class_.id,
+    )
+    student_b = Student(
+        name="Alpha Student",
+        email="schoolalpha@student.com",
+        hashed_password="x",
+        school_id=school.id,
+        class_id=class_.id,
+    )
+    db_session.add_all([student_a, student_b])
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/school/subjects/{subject.id}/students",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert [student["name"] for student in resp.json()] == ["Alpha Student", "Beta Student"]
+
+
+# ── Recordings & Reports (read-only) ─────────────────────────────────────────
+
+async def test_list_subject_recordings_empty(client, school_admin_token, subject):
+    resp = await client.get(
+        f"/school/subjects/{subject.id}/recordings",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_list_subject_reports_empty(client, school_admin_token, subject):
+    resp = await client.get(
+        f"/school/subjects/{subject.id}/reports",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_list_recordings_for_other_school_subject(
+    client, db_session, school_admin_token
+):
+    """School admin should get 404 for a subject that belongs to another school."""
+    other_school = School(name="School B")
+    db_session.add(other_school)
+
+    other_sa = SchoolAdmin(
+        name="Admin B",
+        email="adminb@test.com",
+        hashed_password="x",
+        school_id=1,  # placeholder; will fix
+    )
+
+    await db_session.flush()
+    other_sa.school_id = other_school.id
+    db_session.add(other_sa)
+
+    other_class = Class(name="Class X", school_id=other_school.id)
+    db_session.add(other_class)
+    await db_session.flush()
+
+    other_subject = Subject(name="Art", class_id=other_class.id)
+    db_session.add(other_subject)
+    await db_session.commit()
+    await db_session.refresh(other_subject)
+
+    resp = await client.get(
+        f"/school/subjects/{other_subject.id}/recordings",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 404
+
+
+# ── Chapters ──────────────────────────────────────────────────────────────────
+
+async def test_create_chapter(client, school_admin_token, subject):
+    resp = await client.post(
+        f"/school/subjects/{subject.id}/chapters",
+        json={"name": "Quadratic Equations", "description": "Class 10 Chapter 4"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Quadratic Equations"
+    assert data["description"] == "Class 10 Chapter 4"
+    assert data["subject_id"] == subject.id
+    assert "id" in data
+
+
+async def test_create_chapter_subject_from_other_school(client, db_session, school_admin_token):
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    await db_session.commit()
+    await db_session.refresh(other_school)
+
+    other_class = Class(name="Class 10", school_id=other_school.id)
+    db_session.add(other_class)
+    await db_session.commit()
+    await db_session.refresh(other_class)
+
+    other_subject = Subject(name="Math", class_id=other_class.id)
+    db_session.add(other_subject)
+    await db_session.commit()
+    await db_session.refresh(other_subject)
+
+    resp = await client.post(
+        f"/school/subjects/{other_subject.id}/chapters",
+        json={"name": "Invalid Chapter"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 404
+
+
+async def test_list_chapters(client, db_session, school_admin_token, subject):
+    ch1 = Chapter(name="Chapter 1", subject_id=subject.id)
+    ch2 = Chapter(name="Chapter 2", subject_id=subject.id)
+    db_session.add_all([ch1, ch2])
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/school/subjects/{subject.id}/chapters",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) >= 2
+    names = [c["name"] for c in data]
+    assert "Chapter 1" in names
+    assert "Chapter 2" in names
+
+
+async def test_get_chapter_details(client, db_session, school_admin_token, subject):
+    ch = Chapter(name="Chapter X", description="Desc X", subject_id=subject.id)
+    db_session.add(ch)
+    await db_session.commit()
+    await db_session.refresh(ch)
+
+    resp = await client.get(
+        f"/school/chapters/{ch.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Chapter X"
+    assert data["description"] == "Desc X"
+
+
+async def test_get_chapter_from_other_school(client, db_session, school_admin_token):
+    other_school = School(name="Other School Y")
+    db_session.add(other_school)
+    await db_session.commit()
+    await db_session.refresh(other_school)
+
+    other_class = Class(name="Class Y", school_id=other_school.id)
+    db_session.add(other_class)
+    await db_session.commit()
+    await db_session.refresh(other_class)
+
+    other_subject = Subject(name="Sub Y", class_id=other_class.id)
+    db_session.add(other_subject)
+    await db_session.commit()
+    await db_session.refresh(other_subject)
+
+    other_chapter = Chapter(name="Chapter Y", subject_id=other_subject.id)
+    db_session.add(other_chapter)
+    await db_session.commit()
+    await db_session.refresh(other_chapter)
+
+    resp = await client.get(
+        f"/school/chapters/{other_chapter.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 404
+
+
+async def test_update_chapter(client, db_session, school_admin_token, subject):
+    ch = Chapter(name="Old Name", description="Old Desc", subject_id=subject.id)
+    db_session.add(ch)
+    await db_session.commit()
+    await db_session.refresh(ch)
+
+    resp = await client.put(
+        f"/school/chapters/{ch.id}",
+        json={"name": "New Name", "description": "New Desc"},
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "New Name"
+    assert data["description"] == "New Desc"
+
+
+async def test_delete_chapter(client, db_session, school_admin_token, subject):
+    ch = Chapter(name="To Be Deleted", subject_id=subject.id)
+    db_session.add(ch)
+    await db_session.commit()
+    await db_session.refresh(ch)
+
+    resp = await client.delete(
+        f"/school/chapters/{ch.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp.status_code == 204
+
+    # Verify deleted
+    resp_check = await client.get(
+        f"/school/chapters/{ch.id}",
+        headers={"Authorization": school_admin_token},
+    )
+    assert resp_check.status_code == 404
+
