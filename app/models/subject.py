@@ -12,8 +12,8 @@ class Subject(Base):
     profile_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"))
     teacher_id: Mapped[int | None] = mapped_column(ForeignKey("teachers.id"), nullable=True)
+    teacher_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
     class_: Mapped["Class"] = relationship("Class", back_populates="subjects")
     teacher: Mapped["Teacher | None"] = relationship("Teacher", back_populates="subjects")
     recordings: Mapped[list["Recording"]] = relationship("Recording", back_populates="subject")

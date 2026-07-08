@@ -75,7 +75,7 @@ Estimate from the transcript:
 - code_switching_frequency: "none" | "low" | "medium" | "high"
 
 ## Output Format
-Respond ONLY with a valid JSON object. Do not wrap the JSON in markdown formatting (like ```json), do not include any explanatory prose before or after the JSON.
+Respond ONLY with a valid JSON object. Never omit any field. Every score must be an integer. If you are uncertain, estimate conservatively. If a field cannot be determined, return 0 or an empty array instead of removing it. Return exactly the schema shown below. Do not wrap the JSON in markdown formatting (like ```json), do not include any explanatory prose before or after the JSON.
 
 {{
   "scores": {{
@@ -106,6 +106,27 @@ Respond ONLY with a valid JSON object. Do not wrap the JSON in markdown formatti
   "accuracy_analysis": {{
     "correct_explanations": [<list of correct explanation descriptions or quotes>],
     "potential_inaccuracies": [<list of potential inaccuracies or misconceptions found>]
+  }},
+  
+  "confidence_analysis": {{
+    "score": <int 0-100>,
+    "hesitation_level": "<Low|Medium|High>",
+    "confidence_notes": "<brief explanation>"
+  }},
+
+  "engagement_analysis": {{
+    "score": <int 0-100>,
+    "questions_asked": <int>,
+    "examples_used": <int>,
+    "student_checks": <int>,
+    "interactive_prompts": <int>
+  }},
+
+  "speech_analysis": {{
+    "clarity_score": <int 0-100>,
+    "fluency_score": <int 0-100>,
+    "pace_score": <int 0-100>,
+    "filler_density": <int>
   }}
 }}
 """.strip().strip()

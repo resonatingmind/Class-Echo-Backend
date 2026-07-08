@@ -32,6 +32,7 @@ class SubjectOut(BaseModel):
     class_id: int
     teacher_id: int | None
     teacher: TeacherBrief | None
+    teacher_assigned_at: datetime | None = None
     created_at: datetime
 
     class Config:

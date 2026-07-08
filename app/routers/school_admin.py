@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from datetime import datetime
 
 from app.database import get_db
 from app.core.deps import get_school_admin
@@ -16,16 +17,41 @@ from app.models.llm_report import LLMReport
 from app.schemas.class_ import ClassCreate, ClassUpdate, ClassOut
 from app.schemas.school import SchoolOut
 from app.schemas.school_admin import SchoolAdminProfileOut, SchoolAdminUpdate
-from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest
-from app.schemas.teacher import TeacherCreate, TeacherOut
+from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest, SubjectWithClassOut
+from app.schemas.teacher import TeacherCreate, TeacherOut, TeacherProfileOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut, ChapterKnowledgeOut
+from app.schemas.school_dashboard import (
+    SchoolDashboardOverviewOut,
+    SchoolAnalyticsOut,
+    TeacherRankingOut,
+    RecentActivityOut,
+)
+from app.schemas.teacher_analytics import TeacherAnalyticsOut
+from app.schemas.teacher_recordings import TeacherRecordingOut
 from app.core.security import hash_password
 from app.services.s3_service import upload_image, upload_document
 from app.services import chapter_service
+from app.services.school_dashboard_service import (
+    get_school_dashboard_overview,
+    get_school_analytics,
+    get_teacher_ranking,
+    get_recent_activity,
+)
+from app.services.teacher_analytics_service import get_teacher_analytics
+from app.services.teacher_recordings_service import (
+    get_teacher_recordings,
+)
+from app.services.recording_detail_service import (
+    get_recording_detail,
+)
 from app.models.chapter_document import ChapterDocument
-
+from app.services.teacher_analytics_filters_service import (
+    get_teacher_analytics_filters,
+    AnalyticsFiltersOut,
+)
+from app.services.teacher_profile_service import get_teacher_profile
 
 router = APIRouter()
 
@@ -94,6 +120,65 @@ async def upload_school_logo(
     )
     return result.scalar_one()
 
+
+
+@router.get(
+    "/dashboard/overview",
+    response_model=SchoolDashboardOverviewOut,
+)
+async def dashboard_overview(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_school_dashboard_overview(
+        db,
+        school_admin.school_id,
+    )
+
+
+@router.get(
+    "/dashboard/analytics",
+    response_model=SchoolAnalyticsOut,
+)
+async def dashboard_analytics(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_school_analytics(
+        db,
+        school_admin.school_id,
+    )
+
+
+@router.get(
+    "/dashboard/teacher-ranking",
+    response_model=TeacherRankingOut,
+)
+async def dashboard_teacher_ranking(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_teacher_ranking(
+        db,
+        school_admin.school_id,
+    )
+
+
+@router.get(
+    "/dashboard/recent-activity",
+    response_model=RecentActivityOut,
+)
+async def dashboard_recent_activity(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_recent_activity(
+        db,
+        school_admin.school_id,
+    )
+
+
+
 # ─── Teacher management ───────────────────────────────────────────────────────
 
 @router.get("/teachers", response_model=list[TeacherOut])
@@ -160,6 +245,184 @@ async def create_teacher(
         created_at=t.created_at,
     )
 
+@router.get(
+    "/teachers/{teacher_id}/subjects",
+    response_model=list[SubjectWithClassOut],
+)
+async def get_teacher_subjects(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Subject)
+        .options(
+            selectinload(Subject.teacher),
+            selectinload(Subject.class_),
+        )
+        .join(Class, Subject.class_id == Class.id)
+        .where(
+            Subject.teacher_id == teacher_id,
+            Class.school_id == school_admin.school_id,
+        )
+        .order_by(Subject.name)
+    )
+
+    return result.scalars().all()
+
+@router.get(
+    "/teachers/{teacher_id}/profile",
+    response_model=TeacherProfileOut,
+)
+async def teacher_profile(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Teacher).where(
+            Teacher.id == teacher_id,
+            Teacher.school_id == school_admin.school_id,
+        )
+    )
+
+    teacher = result.scalar_one_or_none()
+
+    if teacher is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Teacher not found",
+        )
+
+    return await get_teacher_profile(
+        db=db,
+        teacher_id=teacher_id,
+    )
+
+@router.get("/teachers/{teacher_id}/analytics", response_model=TeacherAnalyticsOut)
+# async def teacher_analytics(
+#     teacher_id: int,
+#     db: AsyncSession = Depends(get_db),
+#     school_admin=Depends(get_school_admin),
+# ):
+async def teacher_analytics(
+    teacher_id: int,
+
+    class_id: int | None = Query(None),
+    subject_id: int | None = Query(None),
+    semester: int | None = Query(None),
+    status: str | None = Query(None),
+
+    start_date: datetime | None = Query(None),
+    end_date: datetime | None = Query(None),
+    search: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify teacher belongs to this school
+    result = await db.execute(
+        select(Teacher).where(
+            Teacher.id == teacher_id,
+            Teacher.school_id == school_admin.school_id,
+        )
+    )
+    teacher = result.scalar_one_or_none()
+    if teacher is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Teacher not found",
+        )
+    # return await get_teacher_analytics(
+    #     db,
+    #     teacher_id,
+    # )
+    return await get_teacher_analytics(
+    db=db,
+    teacher_id=teacher_id,
+
+    class_id=class_id,
+    subject_id=subject_id,
+    semester=semester,
+    status=status,
+    search=search,
+    start_date=start_date,
+    end_date=end_date,
+)
+    
+@router.get(
+    "/teachers/{teacher_id}/analytics/filters",
+    response_model=AnalyticsFiltersOut,
+)
+async def teacher_analytics_filters(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_teacher_analytics_filters(
+        db=db,
+        teacher_id=teacher_id,
+    )
+
+@router.get(
+    "/teachers/{teacher_id}/recordings",
+    response_model=list[TeacherRecordingOut],
+)
+async def teacher_recordings(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    # Verify teacher belongs to this school
+    result = await db.execute(
+        select(Teacher).where(
+            Teacher.id == teacher_id,
+            Teacher.school_id == school_admin.school_id,
+        )
+    )
+
+    teacher = result.scalar_one_or_none()
+
+    if teacher is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Teacher not found",
+        )
+
+    return await get_teacher_recordings(
+        db,
+        teacher_id,
+    )
+
+@router.get(
+    "/recordings/{recording_id}",
+    response_model=RecordingWithReport,
+)
+async def school_recording_detail(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    recording = await get_recording_detail(
+        db,
+        recording_id,
+    )
+
+    if recording is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Recording not found",
+        )
+
+    if (
+        recording.teacher is None
+        or recording.teacher.school_id != school_admin.school_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to view this recording",
+        )
+
+    return recording
 
 # ─── Classes ──────────────────────────────────────────────────────────────────
 
@@ -298,14 +561,24 @@ async def assign_teacher(
     if not teacher or teacher.school_id != school_admin.school_id:
         raise HTTPException(status_code=404, detail="Teacher not found")
 
-    subject.teacher_id = body.teacher_id
+    # Update assignment only if teacher changed
+    if subject.teacher_id != body.teacher_id:
+        subject.teacher_id = body.teacher_id
+        subject.teacher_assigned_at = datetime.utcnow()
+
     await db.commit()
+    await db.refresh(subject)
 
     result = await db.execute(
-        select(Subject).options(selectinload(Subject.teacher)).where(Subject.id == subject.id)
+        select(Subject)
+        .options(
+            selectinload(Subject.teacher),
+            selectinload(Subject.class_),
+        )
+        .where(Subject.id == subject.id)
     )
-    return result.scalar_one()
 
+    return result.scalar_one()
 
 # ─── Students ────────────────────────────────────────────────────────────────
 

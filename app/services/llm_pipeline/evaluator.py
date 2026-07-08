@@ -164,6 +164,26 @@ def _validate_and_fix(result: dict) -> dict:
     aa.setdefault("correct_explanations", [])
     aa.setdefault("potential_inaccuracies", [])
 
+    # Confidence Analysis
+    confidence = result.setdefault("confidence_analysis", {})
+    confidence.setdefault("score", 0)
+    confidence.setdefault("hesitation_level", "Unknown")
+    confidence.setdefault("confidence_notes", "")
+
+    # Engagement Analysis
+    engagement = result.setdefault("engagement_analysis", {})
+    engagement.setdefault("score", 0)
+    engagement.setdefault("questions_asked", 0)
+    engagement.setdefault("examples_used", 0)
+    engagement.setdefault("student_checks", 0)
+    engagement.setdefault("interactive_prompts", 0)
+
+    # Speech Analysis
+    speech = result.setdefault("speech_analysis", {})
+    speech.setdefault("clarity_score", 0)
+    speech.setdefault("fluency_score", 0)
+    speech.setdefault("pace_score", 0)
+    speech.setdefault("filler_density", 0)
     return result
 
 

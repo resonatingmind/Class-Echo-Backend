@@ -30,3 +30,38 @@ class TeacherOut(BaseModel):
 
 class TeacherUpdate(BaseModel):
     name: str | None = None
+
+
+class TeacherSubjectSummary(BaseModel):
+    id: int
+    name: str
+    class_name: str
+    chapter_count: int
+    recording_count: int
+
+    class Config:
+        from_attributes = True
+
+
+class TeacherStatistics(BaseModel):
+    total_classes: int
+    total_subjects: int
+    total_chapters: int
+    total_recordings: int
+
+
+class TeacherProfileOut(BaseModel):
+    id: int
+    name: str
+    email: str
+
+    assigned_at: datetime | None = None
+
+    classes: list[str]
+
+    subjects: list[TeacherSubjectSummary]
+
+    statistics: TeacherStatistics
+
+    class Config:
+        from_attributes = True

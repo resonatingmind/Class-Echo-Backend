@@ -1,9 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
 
 from app.routers import auth, admin, school_admin, teacher, student, public
 
 app = FastAPI(title="ScholarMetric API", version="1.0.0")
+
+os.makedirs("uploads", exist_ok=True)
+
+app.mount(
+    "/uploads",
+    StaticFiles(directory="uploads"),
+    name="uploads"
+)
 
 app.add_middleware(
     CORSMiddleware,

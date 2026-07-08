@@ -36,48 +36,66 @@ async def upload_audio(file: UploadFile, subject_id: int) -> dict:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    # 2. Upload to S3
-    file_uuid = uuid.uuid4().hex
-    key = f"classecho/recordings/{subject_id}/{file_uuid}{suffix}"
-    try:
-        # Fall back to uploading without ACL if bucket restricts public ACLs
+    # 2. Upload to S3 if configured, otherwise save locally
+    if settings.AWS_STORAGE_BUCKET_NAME and settings.AWS_STORAGE_BUCKET_NAME != "test-bucket":
+        file_uuid = uuid.uuid4().hex
+        key = f"classecho/recordings/{subject_id}/{file_uuid}{suffix}"
         try:
-            s3_client.put_object(
-                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
-                Key=key,
-                Body=contents,
-                ContentType=file.content_type or "audio/mpeg",
-                ACL="public-read"
-            )
-        except Exception:
-            s3_client.put_object(
-                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
-                Key=key,
-                Body=contents,
-                ContentType=file.content_type or "audio/mpeg"
-            )
-    except Exception as exc:
-        print("S3 UPLOAD ERROR:", exc)
-        raise HTTPException(status_code=502, detail=f"Audio upload failed: {exc}")
+            try:
+                s3_client.put_object(
+                    Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                    Key=key,
+                    Body=contents,
+                    ContentType=file.content_type or "audio/mpeg",
+                    ACL="public-read"
+                )
+            except Exception:
+                s3_client.put_object(
+                    Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                    Key=key,
+                    Body=contents,
+                    ContentType=file.content_type or "audio/mpeg"
+                )
+        except Exception as exc:
+            print("S3 UPLOAD ERROR:", exc)
+            raise HTTPException(status_code=502, detail=f"Audio upload failed: {exc}")
 
-    try:
-        url = s3_client.generate_presigned_url(
-            ClientMethod="get_object",
-            Params={
-                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
-                "Key": key,
-            },
-            ExpiresIn=604800,  # 7 days
-        )
-    except Exception as exc:
-        print("S3 PRESIGN ERROR:", exc)
-        url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+        try:
+            url = s3_client.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={
+                    "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                    "Key": key,
+                },
+                ExpiresIn=604800,  # 7 days
+            )
+        except Exception as exc:
+            print("S3 PRESIGN ERROR:", exc)
+            url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
 
-    return {
-        "url": url,
-        "public_id": key,
-        "duration": duration,
-    }
+        return {
+            "url": url,
+            "public_id": key,
+            "duration": duration,
+        }
+    else:
+        # Save locally
+        file_uuid = uuid.uuid4().hex
+        upload_dir = f"uploads/recordings/{subject_id}"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        file_path = f"{upload_dir}/{file_uuid}{suffix}"
+
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        url = f"http://127.0.0.1:8000/{file_path}"
+
+        return {
+            "url": url,
+            "public_id": file_path,
+            "duration": duration,
+        }
 
 async def upload_image(file: UploadFile, folder: str) -> dict:
     """Upload an image to S3 and return url + public_id."""
@@ -152,44 +170,63 @@ async def upload_document(file: UploadFile, folder: str) -> dict:
         ".txt": "text/plain",
     }
     content_type = MIME_TYPES.get(suffix, "application/octet-stream")
-    
-    try:
+    if settings.AWS_STORAGE_BUCKET_NAME and settings.AWS_STORAGE_BUCKET_NAME != "test-bucket":
         try:
-            s3_client.put_object(
-                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
-                Key=key,
-                Body=contents,
-                ContentType=content_type,
-                ACL="public-read"
+            try:
+                s3_client.put_object(
+                    Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                    Key=key,
+                    Body=contents,
+                    ContentType=content_type,
+                    ACL="public-read"
+                )
+            except Exception:
+                s3_client.put_object(
+                    Bucket=settings.AWS_STORAGE_BUCKET_NAME,
+                    Key=key,
+                    Body=contents,
+                    ContentType=content_type
+                )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Document upload failed: {exc}")
+            
+        try:
+            url = s3_client.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={
+                    "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                    "Key": key,
+                },
+                ExpiresIn=604800,  # 7 days
             )
-        except Exception:
-            s3_client.put_object(
-                Bucket=settings.AWS_STORAGE_BUCKET_NAME,
-                Key=key,
-                Body=contents,
-                ContentType=content_type
-            )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Document upload failed: {exc}")
-        
-    try:
-        url = s3_client.generate_presigned_url(
-            ClientMethod="get_object",
-            Params={
-                "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
-                "Key": key,
-            },
-            ExpiresIn=604800,  # 7 days
-        )
-    except Exception as exc:
-        print("S3 PRESIGN ERROR:", exc)
-        url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
-        
-    return {
-        "url": url,
-        "public_id": key,
-        "file_type": suffix.strip(".").upper(),
-    }
+        except Exception as exc:
+            print("S3 PRESIGN ERROR:", exc)
+            url = f"https://{settings.AWS_STORAGE_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+            
+        return {
+            "url": url,
+            "public_id": key,
+            "file_type": suffix.strip(".").upper(),
+        }
+    else:
+        # Save document locally instead of S3
+        file_uuid = uuid.uuid4().hex
+
+        upload_dir = f"uploads/{folder}"
+        os.makedirs(upload_dir, exist_ok=True)
+
+        file_path = f"{upload_dir}/{file_uuid}{suffix}"
+
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        url = f"http://127.0.0.1:8000/{file_path}"
+
+        return {
+            "url": url,
+            "public_id": file_path,
+            "file_type": suffix.strip(".").upper(),
+        }
 
 def delete_audio(public_id: str) -> None:
     try:
