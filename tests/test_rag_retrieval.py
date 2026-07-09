@@ -169,9 +169,13 @@ async def test_retrieve_chapter_context(subject):
                 assert context["retrieved_chunks"][0]["chunk_text"] == "This is a test chunk containing information about machine learning."
 
                 # Verify client embed_content was called
+                from google.genai import types
                 mock_genai_client.models.embed_content.assert_called_once_with(
-                    model="text-embedding-004",
-                    contents="Machine learning is fun"
+                    model="gemini-embedding-001",
+                    contents="Machine learning is fun",
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=1536
+                    )
                 )
     finally:
         sync_engine.dispose()

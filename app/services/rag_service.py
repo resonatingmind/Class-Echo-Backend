@@ -60,9 +60,14 @@ def retrieve_chapter_context(session: Session, chapter_id: int, transcript: str)
     # text-embedding-004 token limit is ~2048, so we truncate if it's too long
     truncated_transcript = transcript[:8000]
     
+    from google.genai import types
+
     response = client.models.embed_content(
-        model="text-embedding-004",
-        contents=truncated_transcript
+        model="gemini-embedding-001",
+        contents=truncated_transcript,
+        config=types.EmbedContentConfig(
+            output_dimensionality=1536
+        )
     )
     
     raw_vector = response.embeddings[0].values

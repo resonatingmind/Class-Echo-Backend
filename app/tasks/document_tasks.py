@@ -92,9 +92,14 @@ def process_chapter_document(self, document_id: int):
             for idx in range(0, len(chunks), batch_size):
                 batch_texts = chunks[idx : idx + batch_size]
                 
+                from google.genai import types
+
                 response = genai_client.models.embed_content(
-                    model="text-embedding-004",
-                    contents=batch_texts
+                    model="gemini-embedding-001",
+                    contents=batch_texts,
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=1536
+                    )
                 )
                 
                 # Retrieve and pad embeddings
