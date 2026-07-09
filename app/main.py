@@ -17,6 +17,7 @@ app.mount(
 
 allowed_origins = [
     "https://class-echo-frontend-2l5wo4kyq-aditya-kumars-projects-75b5f048.vercel.app",
+    "https://class-echo-frontend.vercel.app",
     "http://localhost:19006",
     "http://localhost:8081",
     "http://localhost:3000",
