@@ -7,6 +7,9 @@ from app.models.subject import Subject
 from app.models.class_ import Class
 from app.schemas.chapter import ChapterCreate, ChapterUpdate
 
+from app.models.subject import Subject
+from app.models.teacher import Teacher
+
 
 async def get_owned_subject(db: AsyncSession, subject_id: int, school_id: int) -> Subject:
     result = await db.execute(
@@ -88,3 +91,63 @@ async def delete_chapter(
     chapter = await get_owned_chapter(db, chapter_id, school_id)
     await db.delete(chapter)
     await db.commit()
+
+
+async def get_teacher_owned_subject(
+    db: AsyncSession,
+    subject_id: int,
+    teacher_id: int,
+) -> Subject:
+    result = await db.execute(
+        select(Subject)
+        .options(
+            selectinload(Subject.teacher),
+            selectinload(Subject.class_),
+        )
+        .where(
+            Subject.id == subject_id,
+            Subject.teacher_id == teacher_id,
+        )
+    )
+
+    subject = result.scalar_one_or_none()
+
+    if subject is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Subject not found or not assigned to you",
+        )
+
+    return subject
+
+
+async def get_teacher_owned_chapter(
+    db: AsyncSession,
+    chapter_id: int,
+    teacher_id: int,
+) -> Chapter:
+    result = await db.execute(
+        select(Chapter)
+        .options(
+            selectinload(Chapter.documents),
+            selectinload(Chapter.subject),
+        )
+        .join(
+            Subject,
+            Chapter.subject_id == Subject.id,
+        )
+        .where(
+            Chapter.id == chapter_id,
+            Subject.teacher_id == teacher_id,
+        )
+    )
+
+    chapter = result.scalar_one_or_none()
+
+    if chapter is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chapter not found or not assigned to you",
+        )
+
+    return chapter

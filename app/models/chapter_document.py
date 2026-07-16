@@ -16,4 +16,7 @@ class ChapterDocument(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     chapter: Mapped["Chapter"] = relationship("Chapter", back_populates="documents")
-    chunks: Mapped[list["ChapterChunk"]] = relationship("ChapterChunk", back_populates="document")
+    chunks: Mapped[list["ChapterChunk"]] = relationship("ChapterChunk", back_populates="document",
+    cascade="all, delete-orphan",
+    passive_deletes=True,)
+

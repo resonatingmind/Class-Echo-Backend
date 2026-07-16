@@ -39,17 +39,33 @@ class SubjectOut(BaseModel):
         from_attributes = True
 
 
+# class ClassBrief(BaseModel):
+#     id: int
+#     name: str
+#     class Config:
+#         from_attributes = True
+
 class ClassBrief(BaseModel):
     id: int
     name: str
+    section: str
+    profile_image_url: str | None = None
 
     class Config:
         from_attributes = True
 
 
+# class SubjectWithClassOut(SubjectOut):
+#     """SubjectOut extended with class details — used for teacher-facing routes."""
+#     class_: ClassBrief | None = None
+
+#     class Config:
+#         from_attributes = True
+
 class SubjectWithClassOut(SubjectOut):
-    """SubjectOut extended with class details — used for teacher-facing routes."""
     class_: ClassBrief | None = None
 
+    academic_year: str = "2026-27"
+    status: str = "Active"
     class Config:
         from_attributes = True

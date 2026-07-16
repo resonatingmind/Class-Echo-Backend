@@ -150,7 +150,10 @@ async def list_school_classes(
     _=Depends(get_admin),
 ):
     result = await db.execute(
-        select(Class).where(Class.school_id == school_id).order_by(Class.name)
+        select(Class).where(Class.school_id == school_id).order_by(
+    Class.name,
+    Class.section,
+)
     )
     return result.scalars().all()
 

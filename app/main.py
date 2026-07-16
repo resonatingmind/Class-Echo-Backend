@@ -3,7 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
 
-from app.routers import auth, admin, school_admin, teacher, student, public
+from app.routers import (
+    auth,
+    admin,
+    school_admin,
+    teacher,
+    student,
+    public,
+    planner,
+)
+
 
 app = FastAPI(title="ScholarMetric API", version="1.0.0")
 
@@ -30,7 +39,10 @@ app.include_router(school_admin.router, prefix="/school", tags=["School Admin"])
 app.include_router(teacher.router, prefix="/teacher", tags=["Teacher"])
 app.include_router(student.router, prefix="/student", tags=["Student"])
 app.include_router(public.router, prefix="/public", tags=["Public"])
-
+app.include_router(
+    planner.router,
+    prefix="/school",
+)
 
 @app.get("/health")
 async def health():

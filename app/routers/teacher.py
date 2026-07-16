@@ -13,9 +13,27 @@ from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
 from app.schemas.student import StudentOut
-from app.schemas.teacher import TeacherOut, TeacherUpdate
-from app.schemas.chapter import ChapterOut
+from app.schemas.teacher import (
+    TeacherOut,
+    TeacherUpdate,
+    TeacherDashboardOut,
+    TeacherDashboardSubjectOut,
+)
+from app.schemas.chapter import (
+    ChapterCreate,
+    ChapterUpdate,
+    ChapterOut,
+)
 from app.services.s3_service import upload_audio, upload_image
+from app.services import chapter_service
+from app.models.chapter_document import ChapterDocument
+from app.schemas.chapter import ChapterDocumentOut
+from app.schemas.chapter import ChapterKnowledgeOut
+from app.services import chapter_knowledge_service
+from fastapi import File, UploadFile
+from app.models.chapter_document import ChapterDocument
+from app.schemas.chapter import ChapterDocumentOut
+from app.services.s3_service import upload_document
 from app.tasks.llm_tasks import process_recording
 
 router = APIRouter()
@@ -101,7 +119,9 @@ async def list_subject_students(
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_teacher),
 ):
-    subject = await _get_teacher_subject(subject_id, teacher.id, db)
+    subject = await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
     result = await db.execute(
         select(Student)
         .where(Student.class_id == subject.class_id)
@@ -124,13 +144,121 @@ async def list_my_subjects(
     return result.scalars().all()
 
 
+@router.get(
+    "/dashboard-summary",
+    response_model=TeacherDashboardOut,
+)
+async def teacher_dashboard_summary(
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    subjects_result = await db.execute(
+        select(Subject)
+        .options(
+            selectinload(Subject.class_),
+            selectinload(Subject.recordings),
+        )
+        .where(Subject.teacher_id == teacher.id)
+        .order_by(Subject.name)
+    )
+
+    subjects = subjects_result.scalars().all()
+
+    dashboard = []
+
+    for subject in subjects:
+
+        student_count = await db.scalar(
+            select(func.count(Student.id)).where(
+                Student.class_id == subject.class_id
+            )
+        )
+
+        recordings = subject.recordings
+
+        recording_count = len(
+            [
+                r
+                for r in recordings
+                if not r.is_archived
+            ]
+        )
+
+        if recording_count == 0:
+            status = "No Recording"
+
+        elif any(
+            r.status.value == "processing"
+            for r in recordings
+        ):
+            status = "Processing"
+
+        elif any(
+            r.status.value == "failed"
+            for r in recordings
+        ):
+            status = "Failed"
+
+        else:
+            status = "Completed"
+
+        dashboard.append(
+            TeacherDashboardSubjectOut(
+                subject_id=subject.id,
+                subject_name=subject.name,
+                class_name=subject.class_.name,
+                section=subject.class_.section,
+                academic_year="2026-27",
+                student_count=student_count,
+                recording_count=recording_count,
+                ai_status=status,
+            )
+        )
+
+    return TeacherDashboardOut(
+        subjects=dashboard
+    )
+    
+
+
+@router.delete(
+    "/chapters/{chapter_id}",
+    status_code=204,
+)
+async def delete_teacher_chapter(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    chapter = await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+    recording_count = await db.scalar(
+        select(func.count(Recording.id)).where(
+            Recording.chapter_id == chapter.id,
+        )
+    )
+    if recording_count and recording_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a chapter that contains recordings.",
+        )
+
+    await db.delete(chapter)
+    await db.commit()
+    return None
+
 @router.get("/subjects/{subject_id}", response_model=SubjectWithClassOut)
 async def get_my_subject(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_teacher),
 ):
-    subject = await _get_teacher_subject(subject_id, teacher.id, db)
+    subject = await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
     return subject
 
 
@@ -143,7 +271,9 @@ async def list_subject_chapters(
     from app.models.chapter import Chapter
     from app.schemas.chapter import ChapterOut
     
-    await _get_teacher_subject(subject_id, teacher.id, db)
+    await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
     
     result = await db.execute(
         select(Chapter)
@@ -154,28 +284,305 @@ async def list_subject_chapters(
     return list(result.scalars().all())
 
 
-@router.get("/subjects/{subject_id}/recordings", response_model=list[RecordingWithReport])
-async def list_recordings(
+@router.post(
+    "/subjects/{subject_id}/chapters",
+    response_model=ChapterOut,
+    status_code=201,
+)
+async def create_subject_chapter(
     subject_id: int,
+    body: ChapterCreate,
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_teacher),
 ):
-    await _get_teacher_subject(subject_id, teacher.id, db)
+    # Verify the subject belongs to the logged-in teacher
+    await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
+
+    # Prevent duplicate chapter names in the same subject
+    existing = await db.execute(
+        select(Chapter).where(
+            Chapter.subject_id == subject_id,
+            func.lower(Chapter.name) == body.name.lower(),
+        )
+    )
+
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail="A chapter with this name already exists.",
+        )
+
+    chapter = Chapter(
+        subject_id=subject_id,
+        name=body.name.strip(),
+        description=body.description,
+    )
+
+    db.add(chapter)
+
+    await db.commit()
+
+    await db.refresh(chapter)
+
+    return chapter
+
+
+
+@router.put(
+    "/chapters/{chapter_id}",
+    response_model=ChapterOut,
+)
+async def update_teacher_chapter(
+    chapter_id: int,
+    body: ChapterUpdate,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    chapter = await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+
+    # Prevent duplicate names within the same subject
+    if body.name is not None:
+
+        existing = await db.execute(
+            select(Chapter).where(
+                Chapter.subject_id == chapter.subject_id,
+                func.lower(Chapter.name) == body.name.lower(),
+                Chapter.id != chapter.id,
+            )
+        )
+
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail="A chapter with this name already exists.",
+            )
+
+        chapter.name = body.name.strip()
+
+    if body.description is not None:
+        chapter.description = body.description
+
+    await db.commit()
+
+    await db.refresh(chapter)
+
+    return chapter
+
+
+@router.get(
+    "/chapters/{chapter_id}",
+    response_model=ChapterOut,
+)
+async def get_teacher_chapter_details(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    chapter = await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+
+    return chapter
+
+
+
+@router.get(
+    "/chapters/{chapter_id}/documents",
+    response_model=list[ChapterDocumentOut],
+)
+async def list_teacher_chapter_documents(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    chapter = await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+
     result = await db.execute(
-        select(Recording)
+        select(ChapterDocument)
+        .where(
+            ChapterDocument.chapter_id == chapter.id,
+        )
+        .order_by(
+            ChapterDocument.uploaded_at.desc(),
+        )
+    )
+
+    return list(result.scalars().all())
+
+
+
+@router.get(
+    "/chapters/{chapter_id}/knowledge",
+    response_model=ChapterKnowledgeOut,
+)
+async def get_teacher_chapter_knowledge(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+
+    knowledge = await chapter_knowledge_service.get_chapter_knowledge(
+        db,
+        chapter_id,
+    )
+
+    if not knowledge:
+        raise HTTPException(
+            status_code=404,
+            detail="Chapter knowledge profile has not been generated yet. Please upload and process documents first.",
+        )
+
+    return knowledge
+
+
+
+
+@router.post(
+    "/chapters/{chapter_id}/documents",
+    response_model=ChapterDocumentOut,
+    status_code=201,
+)
+async def upload_teacher_chapter_document(
+    chapter_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    # Verify teacher owns this chapter
+    await chapter_service.get_teacher_owned_chapter(
+        db,
+        chapter_id,
+        teacher.id,
+    )
+
+    # Upload to the same storage location
+    s3_result = await upload_document(
+        file,
+        folder=f"classecho/chapters/{chapter_id}/documents",
+    )
+
+    # Create document record
+    doc = ChapterDocument(
+        chapter_id=chapter_id,
+        file_name=file.filename or "unknown",
+        storage_url=s3_result["url"],
+        file_type=s3_result["file_type"],
+        processing_status="PENDING",
+    )
+
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    # Trigger existing AI pipeline
+    from app.tasks.document_tasks import process_chapter_document
+
+    process_chapter_document.delay(doc.id)
+
+    return doc
+
+
+
+@router.delete(
+    "/chapters/documents/{document_id}",
+    status_code=204,
+)
+async def delete_teacher_chapter_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    result = await db.execute(
+        select(ChapterDocument)
+        .join(Chapter, ChapterDocument.chapter_id == Chapter.id)
+        .join(Subject, Chapter.subject_id == Subject.id)
+        .where(
+            ChapterDocument.id == document_id,
+            Subject.teacher_id == teacher.id,
+        )
+    )
+
+    doc = result.scalar_one_or_none()
+
+    if doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found",
+        )
+
+    await db.delete(doc)
+    await db.commit()
+
+
+
+@router.get("/subjects/{subject_id}/recordings", response_model=list[RecordingWithReport])
+async def list_recordings(
+    subject_id: int,
+    chapter_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
+    # result = await db.execute(
+    #     select(Recording)
+    #     .options(
+    #         selectinload(Recording.report),
+    #         selectinload(Recording.chapter)
+    #         .selectinload(Chapter.documents),
+    #         selectinload(Recording.chapter)
+    #         .selectinload(Chapter.knowledge),
+    #     )
+    #     .where(
+    #         Recording.subject_id == subject_id,
+    #         Recording.teacher_id == teacher.id,
+    #         Recording.is_archived == False
+    #     )
+    #     .order_by(Recording.uploaded_at.desc())
+    # )
+    
+    query = ( select(Recording)
         .options(
-            selectinload(Recording.report),
-            selectinload(Recording.chapter)
-            .selectinload(Chapter.documents),
-            selectinload(Recording.chapter)
-            .selectinload(Chapter.knowledge),
+        selectinload(Recording.report),
+        selectinload(Recording.chapter)
+        .selectinload(Chapter.documents),
+        selectinload(Recording.chapter)
+        .selectinload(Chapter.knowledge),
         )
         .where(
-            Recording.subject_id == subject_id,
-            Recording.teacher_id == teacher.id,
-            Recording.is_archived == False
+        Recording.subject_id == subject_id,
+        Recording.teacher_id == teacher.id,
+        Recording.is_archived == False,
         )
-        .order_by(Recording.uploaded_at.desc())
+    )
+
+    if chapter_id is not None:
+        query = query.where(
+            Recording.chapter_id == chapter_id,
+        )
+
+    result = await db.execute(
+        query.order_by(
+            Recording.uploaded_at.desc(),
+        )
     )
     return result.scalars().all()
 
@@ -194,7 +601,9 @@ async def upload_recording(
 ):
     from app.models.chapter import Chapter
 
-    await _get_teacher_subject(subject_id, teacher.id, db)
+    await chapter_service.get_teacher_owned_subject(db,
+    subject_id,
+    teacher.id,)
 
     # Validate chapter exists and belongs to the subject
     res = await db.execute(
@@ -394,13 +803,40 @@ async def delete_recording(
 
 
 
-async def _get_teacher_subject(subject_id: int, teacher_id: int, db: AsyncSession) -> Subject:
-    result = await db.execute(
-        select(Subject)
-        .options(selectinload(Subject.teacher), selectinload(Subject.class_))
-        .where(Subject.id == subject_id, Subject.teacher_id == teacher_id)
-    )
-    subject = result.scalar_one_or_none()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found or not assigned to you")
-    return subject
+
+# async def _get_teacher_chapter(
+#     chapter_id: int,
+#     teacher_id: int,
+#     db: AsyncSession,
+# ) -> Chapter:
+#     result = await db.execute(
+#         select(Chapter)
+#         .join(Subject, Subject.id == Chapter.subject_id)
+#         .where(
+#             Chapter.id == chapter_id,
+#             Subject.teacher_id == teacher_id,
+#         )
+#     )
+
+#     chapter = result.scalar_one_or_none()
+
+#     if not chapter:
+#         raise HTTPException(
+#             status_code=404,
+#             detail="Chapter not found or not assigned to you",
+#         )
+
+#     return chapter
+
+
+
+# async def _get_teacher_subject(subject_id: int, teacher_id: int, db: AsyncSession) -> Subject:
+#     result = await db.execute(
+#         select(Subject)
+#         .options(selectinload(Subject.teacher), selectinload(Subject.class_))
+#         .where(Subject.id == subject_id, Subject.teacher_id == teacher_id)
+#     )
+#     subject = result.scalar_one_or_none()
+#     if not subject:
+#         raise HTTPException(status_code=404, detail="Subject not found or not assigned to you")
+#     return subject

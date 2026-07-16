@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from datetime import datetime
 from app.database import get_db
@@ -40,6 +40,7 @@ from app.services.school_dashboard_service import (
 from app.services.teacher_analytics_service import get_teacher_analytics
 from app.services.teacher_recordings_service import (
     get_teacher_recordings,
+    get_chapter_recordings,
 )
 from app.services.recording_detail_service import (
     get_recording_detail,
@@ -58,6 +59,19 @@ from fastapi import Query
 
 from app.services.teacher_profile_service import get_teacher_profile
 from app.schemas.teacher import TeacherProfileOut
+from app.schemas.lookup import ( TeacherLookupOut, ClassLookupOut, SubjectLookupOut, )
+
+from app.schemas.quick_assignment import (
+    QuickAssignmentIn,
+    QuickAssignmentOut,
+    ReplaceAssignmentIn,
+    ReplaceAssignmentOut,
+)
+
+from app.services.planner_assignment_service import (
+    quick_assignment,
+    replace_assignment,
+)
 
 router = APIRouter()
 
@@ -213,6 +227,31 @@ async def list_teachers(
     ]
 
 
+@router.get("/teachers/lookup", response_model=TeacherLookupOut)
+async def lookup_teacher(
+    email: str,
+    db: AsyncSession = Depends(get_db),
+    school_admin: SchoolAdmin = Depends(get_school_admin),
+):
+    teacher = await db.scalar(
+        select(Teacher).where(
+            Teacher.school_id == school_admin.school_id,
+            Teacher.email == email,
+        )
+    )
+
+    if teacher:
+        return TeacherLookupOut(
+            exists=True,
+            id=teacher.id,
+            name=teacher.name,
+            email=teacher.email,
+        )
+
+    return TeacherLookupOut(
+        exists=False,
+    )
+
 @router.post("/teachers", response_model=TeacherOut, status_code=201)
 async def create_teacher(
     body: TeacherCreate,
@@ -306,11 +345,7 @@ async def teacher_profile(
     )
 
 @router.get("/teachers/{teacher_id}/analytics", response_model=TeacherAnalyticsOut)
-# async def teacher_analytics(
-#     teacher_id: int,
-#     db: AsyncSession = Depends(get_db),
-#     school_admin=Depends(get_school_admin),
-# ):
+
 async def teacher_analytics(
     teacher_id: int,
 
@@ -338,10 +373,6 @@ async def teacher_analytics(
             status_code=404,
             detail="Teacher not found",
         )
-    # return await get_teacher_analytics(
-    #     db,
-    #     teacher_id,
-    # )
     return await get_teacher_analytics(
     db=db,
     teacher_id=teacher_id,
@@ -400,6 +431,20 @@ async def teacher_recordings(
     )
 
 @router.get(
+    "/chapters/{chapter_id}/recordings",
+    response_model=list[TeacherRecordingOut],
+)
+async def chapter_recordings(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    return await get_chapter_recordings(
+        db=db,
+        chapter_id=chapter_id,
+    )
+
+@router.get(
     "/recordings/{recording_id}",
     response_model=RecordingWithReport,
 )
@@ -440,10 +485,42 @@ async def list_classes(
     school_admin=Depends(get_school_admin),
 ):
     result = await db.execute(
-        select(Class).where(Class.school_id == school_admin.school_id).order_by(Class.name)
+        select(Class).where(Class.school_id == school_admin.school_id).order_by(
+    Class.name,
+    Class.section,
+)
     )
     return result.scalars().all()
 
+
+@router.get("/classes/lookup", response_model=ClassLookupOut)
+async def lookup_class(
+    name: str,
+    section: str,
+    db: AsyncSession = Depends(get_db),
+    school_admin: SchoolAdmin = Depends(get_school_admin),
+):
+    class_ = await db.scalar(
+        select(Class).where(
+            Class.school_id == school_admin.school_id,
+            Class.name == name,
+            Class.section == section,
+        )
+    )
+
+    if class_:
+        return ClassLookupOut(
+            exists=True,
+            id=class_.id,
+            name=class_.name,
+            section=class_.section,
+        )
+
+    return ClassLookupOut(
+        exists=False,
+        name=name,
+        section=section,
+    )
 
 @router.post("/classes", response_model=ClassOut, status_code=201)
 async def create_class(
@@ -451,10 +528,26 @@ async def create_class(
     db: AsyncSession = Depends(get_db),
     school_admin=Depends(get_school_admin),
 ):
+    
+    existing = await db.scalar(
+    select(Class).where(
+        Class.school_id == school_admin.school_id,
+        Class.name == body.name,
+        Class.section == body.section,
+    )
+  )
+
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Class "{body.name}" - Section "{body.section}" already exists.',
+        )
+    
     class_ = Class(
-        name=body.name,
-        profile_image_url=body.profile_image_url,
-        school_id=school_admin.school_id,
+    name=body.name,
+    section=body.section,
+    profile_image_url=body.profile_image_url,
+    school_id=school_admin.school_id,
     )
     db.add(class_)
     await db.commit()
@@ -498,6 +591,41 @@ async def delete_class(
     await db.commit()
 
 
+
+# ─── PLANNER ─────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/planner/quick-assignment",
+    response_model=QuickAssignmentOut,
+)
+async def create_quick_assignment(
+    body: QuickAssignmentIn,
+    db: AsyncSession = Depends(get_db),
+    school_admin: SchoolAdmin = Depends(get_school_admin),
+):
+    return await quick_assignment(
+        db=db,
+        school_admin=school_admin,
+        body=body,
+    )
+
+
+@router.patch(
+    "/planner/assignments/replace",
+    response_model=ReplaceAssignmentOut,
+)
+async def replace_teacher_assignment(
+    body: ReplaceAssignmentIn,
+    db: AsyncSession = Depends(get_db),
+    school_admin: SchoolAdmin = Depends(get_school_admin),
+):
+    return await replace_assignment(
+        db=db,
+        school_admin=school_admin,
+        body=body,
+    )
+
+
 # ─── Subjects ─────────────────────────────────────────────────────────────────
 
 @router.get("/classes/{class_id}/subjects", response_model=list[SubjectOut])
@@ -537,6 +665,50 @@ async def create_subject(
     )
     return result.scalar_one()
 
+
+
+@router.get("/subjects/{class_id}/lookup", response_model=SubjectLookupOut)
+async def lookup_subject(
+    class_id: int,
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    school_admin: SchoolAdmin = Depends(get_school_admin),
+):
+    
+    class_ = await db.scalar(
+    select(Class).where(
+        Class.id == class_id,
+        Class.school_id == school_admin.school_id,
+    )
+)
+
+    if class_ is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Class not found.",
+        )
+    
+    subject = await db.scalar(
+        select(Subject).where(
+            Subject.class_id == class_id,
+            # Subject.name == name,
+            func.lower(Subject.name) == name.lower(),
+        )
+    )
+
+    if subject:
+        return SubjectLookupOut(
+            exists=True,
+            id=subject.id,
+            name=subject.name,
+            class_id=subject.class_id,
+        )
+
+    return SubjectLookupOut(
+        exists=False,
+        name=name,
+        class_id=class_id,
+    )
 
 @router.put("/subjects/{subject_id}", response_model=SubjectOut)
 async def update_subject(
