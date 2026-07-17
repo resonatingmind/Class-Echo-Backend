@@ -41,7 +41,10 @@ class ChapterChunk(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id"))
-    document_id: Mapped[int] = mapped_column(ForeignKey("chapter_documents.id"))
+    document_id: Mapped[int] = mapped_column(ForeignKey(
+        "chapter_documents.id",
+        ondelete="CASCADE",
+    ))
     chunk_text: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     embedding_vector: Mapped[list[float]] = mapped_column(Vector(1536))

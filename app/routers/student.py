@@ -80,7 +80,10 @@ async def list_classes(
     if not school:
         raise HTTPException(status_code=404, detail="School not found")
     result = await db.execute(
-        select(Class).where(Class.school_id == school_id).order_by(Class.name)
+        select(Class).where(Class.school_id == school_id).order_by(
+    Class.name,
+    Class.section,
+)
     )
     return result.scalars().all()
 

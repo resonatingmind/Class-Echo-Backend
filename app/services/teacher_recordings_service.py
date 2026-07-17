@@ -56,3 +56,44 @@ async def get_teacher_recordings(
         )
         for recording in recordings
     ]
+    
+async def get_chapter_recordings(
+    db: AsyncSession,
+    chapter_id: int,
+) -> list[TeacherRecordingOut]:
+
+    result = await db.execute(
+        select(Recording)
+        .options(
+            selectinload(Recording.subject),
+            selectinload(Recording.chapter),
+            selectinload(Recording.report),
+        )
+        .where(Recording.chapter_id == chapter_id)
+        .order_by(Recording.uploaded_at.desc())
+    )
+
+    recordings = result.scalars().all()
+
+    return [
+        TeacherRecordingOut(
+            id=recording.id,
+            lecture_title=recording.lecture_title,
+            chapter_name=(
+                recording.chapter.name
+                if recording.chapter
+                else None
+            ),
+            uploaded_at=recording.uploaded_at,
+            status=recording.status.value,
+            overall_score=(
+                recording.report.overall_score
+                if recording.report
+                else None
+            ),
+            subject_name=recording.subject.name,
+            cloudinary_url=recording.cloudinary_url,
+            duration_seconds=recording.duration_seconds,
+        )
+        for recording in recordings
+    ]

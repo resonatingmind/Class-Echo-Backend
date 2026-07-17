@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal 
 from pydantic import BaseModel, ConfigDict, EmailStr, model_validator
 from app.services.s3_service import sign_url
 
@@ -49,11 +50,12 @@ class TeacherStatistics(BaseModel):
     total_chapters: int
     total_recordings: int
 
-
 class TeacherProfileOut(BaseModel):
     id: int
     name: str
     email: str
+
+    profile_image_url: str | None = None
 
     assigned_at: datetime | None = None
 
@@ -63,5 +65,29 @@ class TeacherProfileOut(BaseModel):
 
     statistics: TeacherStatistics
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def sign_s3_url(self) -> "TeacherProfileOut":
+        if self.profile_image_url:
+            self.profile_image_url = sign_url(self.profile_image_url)
+        return self
+
+class TeacherDashboardSubjectOut(BaseModel):
+    subject_id: int
+    subject_name: str
+    class_name: str
+    section: str
+    academic_year: str
+    student_count: int
+    recording_count: int
+    ai_status: Literal[
+        "No Recording",
+        "Processing",
+        "Completed",
+        "Failed",
+    ]
+
+
+class TeacherDashboardOut(BaseModel):
+    subjects: list[TeacherDashboardSubjectOut]
