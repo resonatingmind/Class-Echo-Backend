@@ -68,6 +68,22 @@ from app.services.planner_assignment_service import (
     replace_assignment,
 )
 
+from fastapi.responses import StreamingResponse
+from app.models.timetable_entry import TimetableEntry
+from app.schemas.timetable import (
+    TimetableEntryCreate,
+    TimetableEntryUpdate,
+    TimetableEntryOut,
+    TimetableImportResult,
+)
+from app.services.timetable_service import (
+    build_timetable_entry_out,
+    build_template_workbook,
+    import_timetable_from_excel,
+    day_sort_index,
+    _str_to_time,
+)
+
 router = APIRouter()
 
 
@@ -986,6 +1002,235 @@ async def regenerate_chapter_knowledge(
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+# ─── TIMETABLE ────────────────────────────────────────────────────────────
+
+@router.get("/timetable", response_model=list[TimetableEntryOut])
+async def list_timetable(
+    class_id: int | None = None,
+    day_of_week: str | None = None,
+    academic_year: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    query = (
+        select(TimetableEntry)
+        .options(
+            selectinload(TimetableEntry.class_),
+            selectinload(TimetableEntry.subject),
+            selectinload(TimetableEntry.teacher),
+        )
+        .where(TimetableEntry.school_id == school_admin.school_id)
+    )
+    if class_id is not None:
+        query = query.where(TimetableEntry.class_id == class_id)
+    if day_of_week is not None:
+        query = query.where(TimetableEntry.day_of_week == day_of_week.capitalize())
+    if academic_year is not None:
+        query = query.where(TimetableEntry.academic_year == academic_year)
+
+    result = await db.execute(query)
+    entries = sorted(
+        result.scalars().all(),
+        key=lambda e: (day_sort_index(e.day_of_week), e.period_number),
+    )
+    return [build_timetable_entry_out(e) for e in entries]
+
+
+@router.get("/timetable/template")
+async def download_timetable_template():
+    # Intentionally unauthenticated: this is a static, blank example file
+    # with no school data, so it can be opened directly as a download link.
+    buffer = build_template_workbook()
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=timetable_template.xlsx"},
+    )
+
+
+@router.post("/timetable/import", response_model=TimetableImportResult)
+async def import_timetable(
+    file: UploadFile = File(...),
+    replace_existing: bool = False,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    return await import_timetable_from_excel(
+        db, school_admin.school_id, content, replace_existing
+    )
+
+
+async def _get_owned_teacher_for_timetable(
+    teacher_id: int, school_id: int, db: AsyncSession
+) -> Teacher:
+    result = await db.execute(select(Teacher).where(Teacher.id == teacher_id))
+    teacher = result.scalar_one_or_none()
+    if not teacher or teacher.school_id != school_id:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    return teacher
+
+
+async def _check_timetable_clashes(
+    db: AsyncSession,
+    class_id: int,
+    teacher_id: int,
+    day_of_week: str,
+    period_number: int,
+    academic_year: str,
+    exclude_entry_id: int | None = None,
+) -> None:
+    class_clash_query = select(TimetableEntry).where(
+        TimetableEntry.class_id == class_id,
+        TimetableEntry.day_of_week == day_of_week,
+        TimetableEntry.period_number == period_number,
+        TimetableEntry.academic_year == academic_year,
+    )
+    teacher_clash_query = select(TimetableEntry).where(
+        TimetableEntry.teacher_id == teacher_id,
+        TimetableEntry.day_of_week == day_of_week,
+        TimetableEntry.period_number == period_number,
+        TimetableEntry.academic_year == academic_year,
+    )
+    if exclude_entry_id is not None:
+        class_clash_query = class_clash_query.where(TimetableEntry.id != exclude_entry_id)
+        teacher_clash_query = teacher_clash_query.where(TimetableEntry.id != exclude_entry_id)
+
+    class_clash = await db.scalar(class_clash_query)
+    if class_clash:
+        raise HTTPException(
+            status_code=400,
+            detail="This class already has a period at that day and time.",
+        )
+
+    teacher_clash = await db.scalar(teacher_clash_query)
+    if teacher_clash:
+        raise HTTPException(
+            status_code=400,
+            detail="This teacher is already scheduled in another class at that day and time.",
+        )
+
+
+@router.post("/timetable", response_model=TimetableEntryOut, status_code=201)
+async def create_timetable_entry(
+    body: TimetableEntryCreate,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    await _get_owned_class(body.class_id, school_admin.school_id, db)
+    await _get_owned_subject(body.subject_id, school_admin.school_id, db)
+    await _get_owned_teacher_for_timetable(body.teacher_id, school_admin.school_id, db)
+
+    await _check_timetable_clashes(
+        db, body.class_id, body.teacher_id, body.day_of_week,
+        body.period_number, body.academic_year,
+    )
+
+    entry = TimetableEntry(
+        school_id=school_admin.school_id,
+        class_id=body.class_id,
+        subject_id=body.subject_id,
+        teacher_id=body.teacher_id,
+        day_of_week=body.day_of_week,
+        period_number=body.period_number,
+        start_time=_str_to_time(body.start_time),
+        end_time=_str_to_time(body.end_time),
+        room=body.room,
+        academic_year=body.academic_year,
+    )
+    db.add(entry)
+    await db.commit()
+    result = await db.execute(
+        select(TimetableEntry)
+        .options(
+            selectinload(TimetableEntry.class_),
+            selectinload(TimetableEntry.subject),
+            selectinload(TimetableEntry.teacher),
+        )
+        .where(TimetableEntry.id == entry.id)
+    )
+    return build_timetable_entry_out(result.scalar_one())
+
+
+@router.put("/timetable/{entry_id}", response_model=TimetableEntryOut)
+async def update_timetable_entry(
+    entry_id: int,
+    body: TimetableEntryUpdate,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    entry = await _get_owned_timetable_entry(entry_id, school_admin.school_id, db)
+
+    updates = body.model_dump(exclude_unset=True)
+
+    if updates.get("subject_id") is not None:
+        await _get_owned_subject(updates["subject_id"], school_admin.school_id, db)
+
+    teacher_id = updates.get("teacher_id", entry.teacher_id)
+    if updates.get("teacher_id") is not None:
+        await _get_owned_teacher_for_timetable(teacher_id, school_admin.school_id, db)
+
+    day = updates.get("day_of_week", entry.day_of_week)
+    period = updates.get("period_number", entry.period_number)
+    academic_year = updates.get("academic_year", entry.academic_year)
+
+    if (
+        "day_of_week" in updates
+        or "period_number" in updates
+        or "teacher_id" in updates
+        or "academic_year" in updates
+    ):
+        await _check_timetable_clashes(
+            db, entry.class_id, teacher_id, day, period, academic_year,
+            exclude_entry_id=entry.id,
+        )
+
+    if "start_time" in updates:
+        updates["start_time"] = _str_to_time(updates["start_time"])
+    if "end_time" in updates:
+        updates["end_time"] = _str_to_time(updates["end_time"])
+
+    for field, value in updates.items():
+        setattr(entry, field, value)
+
+    await db.commit()
+    result = await db.execute(
+        select(TimetableEntry)
+        .options(
+            selectinload(TimetableEntry.class_),
+            selectinload(TimetableEntry.subject),
+            selectinload(TimetableEntry.teacher),
+        )
+        .where(TimetableEntry.id == entry.id)
+    )
+    return build_timetable_entry_out(result.scalar_one())
+
+
+@router.delete("/timetable/{entry_id}", status_code=204)
+async def delete_timetable_entry(
+    entry_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    entry = await _get_owned_timetable_entry(entry_id, school_admin.school_id, db)
+    await db.delete(entry)
+    await db.commit()
+
+
+async def _get_owned_timetable_entry(
+    entry_id: int, school_id: int, db: AsyncSession
+) -> TimetableEntry:
+    result = await db.execute(
+        select(TimetableEntry).where(TimetableEntry.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry or entry.school_id != school_id:
+        raise HTTPException(status_code=404, detail="Timetable entry not found")
+    return entry
 
 
 async def _get_owned_class(class_id: int, school_id: int, db: AsyncSession) -> Class:
