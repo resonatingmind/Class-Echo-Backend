@@ -36,7 +36,36 @@ from app.schemas.chapter import ChapterDocumentOut
 from app.services.s3_service import upload_document
 from app.tasks.llm_tasks import process_recording
 
+from app.models.timetable_entry import TimetableEntry
+from app.schemas.timetable import TimetableEntryOut
+from app.services.timetable_service import build_timetable_entry_out, day_sort_index
+
 router = APIRouter()
+
+
+# ─── TIMETABLE (read-only) ─────────────────────────────────────────────────
+
+@router.get("/timetable", response_model=list[TimetableEntryOut])
+async def get_my_timetable(
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    """A teacher can view their full weekly timetable but cannot edit it —
+    only the school admin manages the schedule."""
+    result = await db.execute(
+        select(TimetableEntry)
+        .options(
+            selectinload(TimetableEntry.class_),
+            selectinload(TimetableEntry.subject),
+            selectinload(TimetableEntry.teacher),
+        )
+        .where(TimetableEntry.teacher_id == teacher.id)
+    )
+    entries = sorted(
+        result.scalars().all(),
+        key=lambda e: (day_sort_index(e.day_of_week), e.period_number),
+    )
+    return [build_timetable_entry_out(e) for e in entries]
 
 
 def _teacher_out(teacher) -> TeacherOut:
