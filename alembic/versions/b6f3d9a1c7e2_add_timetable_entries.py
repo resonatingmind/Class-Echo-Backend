@@ -21,11 +21,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.create_table(
         "timetable_entries",
-        sa.Column("id", sa.Integer(), primary_key=True, index=True),
-        sa.Column("school_id", sa.Integer(), sa.ForeignKey("schools.id"), nullable=False, index=True),
-        sa.Column("class_id", sa.Integer(), sa.ForeignKey("classes.id"), nullable=False, index=True),
-        sa.Column("subject_id", sa.Integer(), sa.ForeignKey("subjects.id"), nullable=False, index=True),
-        sa.Column("teacher_id", sa.Integer(), sa.ForeignKey("teachers.id"), nullable=False, index=True),
+        sa.Column("id", sa.Integer(), primary_key=True),
+        sa.Column("school_id", sa.Integer(), sa.ForeignKey("schools.id"), nullable=False),
+        sa.Column("class_id", sa.Integer(), sa.ForeignKey("classes.id"), nullable=False),
+        sa.Column("subject_id", sa.Integer(), sa.ForeignKey("subjects.id"), nullable=False),
+        sa.Column("teacher_id", sa.Integer(), sa.ForeignKey("teachers.id"), nullable=False),
         sa.Column("day_of_week", sa.String(length=20), nullable=False),
         sa.Column("period_number", sa.Integer(), nullable=False),
         sa.Column("start_time", sa.Time(), nullable=False),
