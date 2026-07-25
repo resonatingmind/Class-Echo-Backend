@@ -15,9 +15,14 @@ class SchoolAdmin(Base):
     school_id: Mapped[int] = mapped_column(ForeignKey("schools.id"), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-    # Invite lifecycle: invited (no password yet, admin-created) -> active (accepted invite, set own password).
+    # Lifecycle: invited (admin-created, no password) -> active on accept-invite, or
+    # pending_approval (self-registered a new school) -> active/rejected on admin review,
+    # active -> suspended -> active.
     status: Mapped[str] = mapped_column(String(30), server_default="active", nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     invited_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id"), nullable=True)
+    rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     school: Mapped["School"] = relationship("School", back_populates="admin")

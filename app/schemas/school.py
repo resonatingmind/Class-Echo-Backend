@@ -12,6 +12,22 @@ class SchoolCreate(BaseModel):
     admin_email: EmailStr
 
 
+class SchoolRegisterRequest(BaseModel):
+    school_name: str
+    school_address: str | None = None
+    admin_name: str
+    admin_email: EmailStr
+    admin_password: str
+
+
+class SchoolRejectRequest(BaseModel):
+    reason: str | None = None
+
+
+class SchoolDeleteRequest(BaseModel):
+    password: str
+
+
 class SchoolUpdate(BaseModel):
     name: str | None = None
     address: str | None = None
@@ -24,6 +40,7 @@ class SchoolAdminOut(BaseModel):
     email: str
     status: str = "active"
     email_verified: bool = False
+    rejected_reason: str | None = None
 
     class Config:
         from_attributes = True

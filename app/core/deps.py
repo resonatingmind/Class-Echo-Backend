@@ -116,3 +116,20 @@ async def get_active_teacher(teacher=Depends(get_teacher)):
         detail = TEACHER_STATUS_DETAIL.get(teacher.status, "teacher_inactive")
         raise HTTPException(status_code=403, detail=detail)
     return teacher
+
+
+SCHOOL_ADMIN_STATUS_DETAIL = {
+    "invited": "school_admin_invited",
+    "pending_approval": "school_admin_pending_approval",
+    "rejected": "school_admin_rejected",
+    "suspended": "school_admin_suspended",
+}
+
+
+async def get_active_school_admin(school_admin=Depends(get_school_admin)):
+    """Gate for school-admin business endpoints. `/school/me` uses
+    get_school_admin directly so a pending school can still poll its status."""
+    if school_admin.status != "active":
+        detail = SCHOOL_ADMIN_STATUS_DETAIL.get(school_admin.status, "school_admin_inactive")
+        raise HTTPException(status_code=403, detail=detail)
+    return school_admin

@@ -20,6 +20,7 @@ from app.schemas.auth import (
     AcceptInviteRequest,
     TeacherRegisterRequest,
 )
+from app.schemas.school import SchoolRegisterRequest
 from app.models.admin import Admin
 from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
@@ -216,6 +217,56 @@ async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depe
 
     token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
     return TokenResponse(access_token=token, role="teacher")
+
+
+@router.post(
+    "/school/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def school_register(body: SchoolRegisterRequest, db: AsyncSession = Depends(get_db)):
+    for _, Model in ROLE_MODELS:
+        result = await db.execute(select(Model).where(Model.email == body.admin_email))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email already registered")
+
+    school = School(name=body.school_name, address=body.school_address)
+    db.add(school)
+    await db.flush()  # get school.id
+
+    school_admin = SchoolAdmin(
+        name=body.admin_name,
+        email=body.admin_email,
+        hashed_password=hash_password(body.admin_password),
+        school_id=school.id,
+        status="pending_approval",
+    )
+    db.add(school_admin)
+    await db.commit()
+    await db.refresh(school_admin)
+
+    raw_token, token_hash = generate_token_pair()
+    db.add(
+        AuthToken(
+            user_type="school_admin",
+            user_id=school_admin.id,
+            token_hash=token_hash,
+            purpose="email_verification",
+            expires_at=datetime.utcnow() + timedelta(days=3),
+        )
+    )
+    await db.commit()
+    verify_link = f"{settings.FRONTEND_URL}/verify-email?token={raw_token}"
+    send_email_task.delay(
+        school_admin.email,
+        "Verify your email — Class Echo",
+        f"<p>Hi {school_admin.name},</p><p>Verify your email by clicking "
+        f"<a href='{verify_link}'>this link</a>. This is optional and won't "
+        f"block your access.</p>",
+    )
+
+    token = create_access_token({"sub": str(school_admin.id), "role": "school_admin"})
+    return TokenResponse(access_token=token, role="school_admin")
 
 
 @router.get("/verify-email")
