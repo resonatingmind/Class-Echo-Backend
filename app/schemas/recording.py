@@ -1,7 +1,21 @@
 from datetime import datetime
 from pydantic import BaseModel, model_validator
+from sqlalchemy import inspect as sa_inspect
 from app.models.recording import RecordingStatus
 from app.services.s3_service import sign_url
+
+
+def _loaded_relationship(obj, name: str):
+    """Return obj.<name> only if already eager-loaded, without triggering a
+    lazy load — lazy loads aren't safe from a sync pydantic validator running
+    outside the async greenlet."""
+    try:
+        state = sa_inspect(obj)
+    except Exception:
+        return None
+    if name in state.unloaded:
+        return None
+    return getattr(obj, name)
 
 
 class RecordingOut(BaseModel):
@@ -101,19 +115,18 @@ class LLMReportOut(BaseModel):
                     potential_inaccuracies=aa.get("potential_inaccuracies", []),
                 )
 
-        # Try to get chapter info from the related recording
-        recording = None
-        if hasattr(data, "recording"):
-            recording = data.recording
+        # Try to get chapter info from the related recording — only ever via
+        # already eager-loaded relationships, since this validator runs
+        # synchronously and can't safely trigger an async lazy load.
+        recording = None if isinstance(data, dict) else _loaded_relationship(data, "recording")
 
         if recording:
-            chapter = getattr(recording, "chapter", None)
+            chapter = _loaded_relationship(recording, "chapter")
             if chapter:
-                doc_count = len(chapter.documents) if hasattr(chapter, "documents") else 0
-                knowledge = getattr(chapter, "knowledge", None)
-                learning_objs = []
-                if knowledge:
-                    learning_objs = knowledge.learning_objectives or []
+                documents = _loaded_relationship(chapter, "documents")
+                doc_count = len(documents) if documents is not None else 0
+                knowledge = _loaded_relationship(chapter, "knowledge")
+                learning_objs = knowledge.learning_objectives or [] if knowledge else []
 
                 instance.chapter_info = ChapterInfoOut(
                     chapter_name=chapter.name,
