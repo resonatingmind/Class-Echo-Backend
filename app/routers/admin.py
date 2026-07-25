@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
@@ -5,7 +7,10 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.core.deps import get_admin
-from app.core.security import hash_password
+from app.core.security import generate_token_pair
+from app.config import settings
+from app.models.auth_token import AuthToken
+from app.tasks.email_tasks import send_email_task
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
 from app.models.class_ import Class
@@ -37,7 +42,7 @@ async def list_schools(
 async def create_school(
     body: SchoolCreate,
     db: AsyncSession = Depends(get_db),
-    _=Depends(get_admin),
+    admin=Depends(get_admin),
 ):
     # Check admin email not already taken
     from app.models.admin import Admin
@@ -55,12 +60,35 @@ async def create_school(
     school_admin = SchoolAdmin(
         name=body.admin_name,
         email=body.admin_email,
-        hashed_password=hash_password(body.admin_password),
+        hashed_password=None,
         school_id=school.id,
+        status="invited",
+        invited_by_admin_id=admin.id,
     )
     db.add(school_admin)
+    await db.flush()  # get school_admin.id
+
+    raw_token, token_hash = generate_token_pair()
+    db.add(
+        AuthToken(
+            user_type="school_admin",
+            user_id=school_admin.id,
+            token_hash=token_hash,
+            purpose="invite",
+            expires_at=datetime.utcnow() + timedelta(days=7),
+        )
+    )
     await db.commit()
     await db.refresh(school)
+
+    invite_link = f"{settings.FRONTEND_URL}/accept-invite?token={raw_token}"
+    send_email_task.delay(
+        school_admin.email,
+        "You've been invited to Class Echo",
+        f"<p>Hi {school_admin.name},</p><p>You've been set up as the admin for "
+        f"{school.name} on Class Echo. Set your password to get started: "
+        f"<a href='{invite_link}'>{invite_link}</a></p>",
+    )
 
     result = await db.execute(
         select(School).options(selectinload(School.admin)).where(School.id == school.id)

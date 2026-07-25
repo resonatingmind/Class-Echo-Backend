@@ -11,6 +11,15 @@ class TeacherCreate(BaseModel):
     profile_image_url: str | None = None
 
 
+class TeacherInviteRequest(BaseModel):
+    name: str
+    email: EmailStr
+
+
+class TeacherRejectRequest(BaseModel):
+    reason: str | None = None
+
+
 class TeacherOut(BaseModel):
     id: int
     name: str
@@ -19,6 +28,9 @@ class TeacherOut(BaseModel):
     school_id: int | None
     school_name: str | None = None
     created_at: datetime
+    status: str = "active"
+    email_verified: bool = False
+    rejected_reason: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

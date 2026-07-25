@@ -1,17 +1,35 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.core.security import verify_password, hash_password, create_access_token
-from app.schemas.auth import LoginRequest, TokenResponse, StudentSignupRequest
+from app.core.security import (
+    verify_password,
+    hash_password,
+    create_access_token,
+    hash_token,
+    generate_token_pair,
+)
+from app.schemas.auth import (
+    LoginRequest,
+    TokenResponse,
+    StudentSignupRequest,
+    AcceptInviteRequest,
+    TeacherRegisterRequest,
+)
 from app.models.admin import Admin
 from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
 from app.models.student import Student
 from app.models.school import School
 from app.models.class_ import Class
+from app.models.auth_token import AuthToken
+from app.services import teacher_onboarding_service as onboarding
+from app.tasks.email_tasks import send_email_task
+from app.config import settings
 
 router = APIRouter()
 
@@ -94,3 +112,131 @@ async def student_signup(body: StudentSignupRequest, db: AsyncSession = Depends(
 
     token = create_access_token({"sub": str(student.id), "role": "student"})
     return TokenResponse(access_token=token, role="student")
+
+
+ONBOARDING_MODELS = {"school_admin": SchoolAdmin, "teacher": Teacher}
+
+
+@router.post("/accept-invite", response_model=TokenResponse)
+async def accept_invite(body: AcceptInviteRequest, db: AsyncSession = Depends(get_db)):
+    token_hash = hash_token(body.token)
+    result = await db.execute(
+        select(AuthToken).where(
+            AuthToken.token_hash == token_hash,
+            AuthToken.purpose == "invite",
+        )
+    )
+    invite = result.scalar_one_or_none()
+    if not invite or invite.used_at or invite.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="This invite link is invalid or has expired")
+
+    Model = ONBOARDING_MODELS.get(invite.user_type)
+    if Model is None:
+        raise HTTPException(status_code=400, detail="This invite link is invalid or has expired")
+
+    user = await db.get(Model, invite.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="This invite link is invalid or has expired")
+
+    user.hashed_password = hash_password(body.password)
+    user.status = "active"
+    # Clicking an emailed invite link is itself proof of email ownership.
+    user.email_verified = True
+    invite.used_at = datetime.utcnow()
+    await db.commit()
+
+    token = create_access_token({"sub": str(user.id), "role": invite.user_type})
+    return TokenResponse(access_token=token, role=invite.user_type)
+
+
+@router.post(
+    "/teacher/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depends(get_db)):
+    school = await db.get(School, body.school_id)
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+
+    action, existing = await onboarding.classify_teacher_signup(db, body.email, body.school_id)
+
+    if action == onboarding.CONFLICT_TAKEN:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    if action == onboarding.CONFLICT_OTHER_SCHOOL:
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already associated with a different school",
+        )
+    if action == onboarding.EXISTING_PENDING_SAME_SCHOOL:
+        raise HTTPException(
+            status_code=409,
+            detail="You already have a registration request pending approval for this school",
+        )
+
+    if action == onboarding.EXISTING_INVITED_SAME_SCHOOL:
+        # Complete the school admin's invite using the password chosen here.
+        teacher = existing
+        teacher.name = body.name
+        teacher.hashed_password = hash_password(body.password)
+        teacher.status = "active"
+    else:
+        teacher = Teacher(
+            name=body.name,
+            email=body.email,
+            hashed_password=hash_password(body.password),
+            school_id=body.school_id,
+            status="pending_approval",
+        )
+        db.add(teacher)
+
+    await db.commit()
+    await db.refresh(teacher)
+
+    if teacher.status == "pending_approval":
+        raw_token, token_hash = generate_token_pair()
+        db.add(
+            AuthToken(
+                user_type="teacher",
+                user_id=teacher.id,
+                token_hash=token_hash,
+                purpose="email_verification",
+                expires_at=datetime.utcnow() + timedelta(days=3),
+            )
+        )
+        await db.commit()
+        verify_link = f"{settings.FRONTEND_URL}/verify-email?token={raw_token}"
+        send_email_task.delay(
+            teacher.email,
+            "Verify your email — Class Echo",
+            f"<p>Hi {teacher.name},</p><p>Verify your email by clicking "
+            f"<a href='{verify_link}'>this link</a>. This is optional and won't "
+            f"block your access.</p>",
+        )
+
+    token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
+    return TokenResponse(access_token=token, role="teacher")
+
+
+@router.get("/verify-email")
+async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
+    token_hash = hash_token(token)
+    result = await db.execute(
+        select(AuthToken).where(
+            AuthToken.token_hash == token_hash,
+            AuthToken.purpose == "email_verification",
+        )
+    )
+    record = result.scalar_one_or_none()
+    if not record or record.used_at or record.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="This verification link is invalid or has expired")
+
+    Model = ONBOARDING_MODELS.get(record.user_type)
+    user = await db.get(Model, record.user_id) if Model else None
+    if not user:
+        raise HTTPException(status_code=400, detail="This verification link is invalid or has expired")
+
+    user.email_verified = True
+    record.used_at = datetime.utcnow()
+    await db.commit()
+    return {"email_verified": True}
