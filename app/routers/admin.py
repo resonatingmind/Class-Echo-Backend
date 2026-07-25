@@ -339,7 +339,7 @@ async def list_school_subject_recordings(
     await _get_school_subject(subject_id, school_id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(selectinload(Recording.report).selectinload(LLMReport.recording))
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )

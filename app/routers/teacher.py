@@ -9,6 +9,7 @@ from app.database import get_db
 from app.core.deps import get_teacher, get_active_teacher
 from app.models.subject import Subject
 from app.models.recording import Recording
+from app.models.llm_report import LLMReport
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
