@@ -189,7 +189,7 @@ async def teacher_dashboard_summary(
         select(Subject)
         .options(
             selectinload(Subject.class_),
-            selectinload(Subject.recordings),
+            selectinload(Subject.recordings).selectinload(Recording.report),
         )
         .where(Subject.teacher_id == teacher.id)
         .order_by(Subject.name)
@@ -235,6 +235,13 @@ async def teacher_dashboard_summary(
         else:
             status = "Completed"
 
+        scores = [
+            float(r.report.overall_score)
+            for r in recordings
+            if not r.is_archived and r.report is not None and r.report.overall_score is not None
+        ]
+        average_score = round(sum(scores) / len(scores), 1) if scores else None
+
         dashboard.append(
             TeacherDashboardSubjectOut(
                 subject_id=subject.id,
@@ -245,6 +252,7 @@ async def teacher_dashboard_summary(
                 student_count=student_count,
                 recording_count=recording_count,
                 ai_status=status,
+                average_score=average_score,
             )
         )
 

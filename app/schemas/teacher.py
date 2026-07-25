@@ -99,6 +99,7 @@ class TeacherDashboardSubjectOut(BaseModel):
         "Completed",
         "Failed",
     ]
+    average_score: float | None = None
 
 
 class TeacherDashboardOut(BaseModel):
