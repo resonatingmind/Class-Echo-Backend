@@ -2,12 +2,15 @@ from datetime import datetime
 from pydantic import BaseModel, model_validator
 from app.models.recording import RecordingStatus
 from app.services.s3_service import sign_url
+from app.schemas.learning_plan import LearningPlanOut
 
 
 class RecordingOut(BaseModel):
     id: int
     subject_id: int
     chapter_id: int | None = None
+    learning_plan_id: int | None = None
+    learning_plan: LearningPlanOut | None = None
     teacher_id: int
     chapter_name: str | None
     lecture_title: str | None = None

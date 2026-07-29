@@ -33,6 +33,9 @@ Learning Objectives: {learning_objectives}
 Key Concepts / Must-Cover Concepts: {key_concepts}
 Must-Cover Topics: {must_cover_topics}
 
+--- LECTURE LEARNING PLAN (MICRO PLANNER) ---
+{learning_plan_info}
+
 Retrieved Reference Chunks:
 {retrieved_chunks}
 --------------

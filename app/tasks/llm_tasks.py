@@ -69,6 +69,57 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             if recording.transcription:
                 reference_context["transcript"] = recording.transcription
 
+            if recording.learning_plan_id:
+                from app.models.learning_plan import LearningPlan
+                lp = session.get(LearningPlan, recording.learning_plan_id)
+                if lp:
+                    reference_context["learning_plan"] = {
+                        "id": lp.id,
+                        "date": lp.date,
+                        "topic_name": lp.topic_name,
+                        "sub_topic": lp.sub_topic,
+                        "classwork_activities": lp.classwork_activities,
+                        "assessment_task": lp.assessment_task,
+                        "teaching_aids": lp.teaching_aids,
+                        "learning_outcomes": lp.learning_outcomes,
+                    }
+            elif recording.chapter_id:
+                from app.models.learning_plan import LearningPlan
+                plans = session.query(LearningPlan).filter(LearningPlan.chapter_id == recording.chapter_id).all()
+                if plans:
+                    matched = None
+                    if recording.lecture_title:
+                        title_clean = recording.lecture_title.strip().lower()
+                        for p in plans:
+                            if p.sub_topic and p.sub_topic.strip().lower() == title_clean:
+                                matched = p
+                                break
+                            if p.topic_name and p.topic_name.strip().lower() == title_clean:
+                                matched = p
+                                break
+                    if matched:
+                        reference_context["learning_plan"] = {
+                            "id": matched.id,
+                            "date": matched.date,
+                            "topic_name": matched.topic_name,
+                            "sub_topic": matched.sub_topic,
+                            "classwork_activities": matched.classwork_activities,
+                            "assessment_task": matched.assessment_task,
+                            "teaching_aids": matched.teaching_aids,
+                            "learning_outcomes": matched.learning_outcomes,
+                        }
+                    else:
+                        reference_context["chapter_learning_plans"] = [
+                            {
+                                "id": p.id,
+                                "topic_name": p.topic_name,
+                                "sub_topic": p.sub_topic,
+                                "classwork_activities": p.classwork_activities,
+                                "learning_outcomes": p.learning_outcomes,
+                            }
+                            for p in plans
+                        ]
+
             report_data = analyze_recording(fresh_url, reference_context=reference_context)
 
             report = LLMReport(
