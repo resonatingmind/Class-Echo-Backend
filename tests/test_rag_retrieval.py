@@ -120,7 +120,7 @@ async def test_retrieve_chapter_context(subject):
             chapter_id=chapter.id,
             document_id=doc.id,
             chunk_text="This is a test chunk containing information about machine learning.",
-            embedding_vector=[0.1] * 3072
+            embedding_vector=[0.1] * 1536
         )
         session.add(chunk)
 
@@ -169,9 +169,13 @@ async def test_retrieve_chapter_context(subject):
                 assert context["retrieved_chunks"][0]["chunk_text"] == "This is a test chunk containing information about machine learning."
 
                 # Verify client embed_content was called
+                from google.genai import types
                 mock_genai_client.models.embed_content.assert_called_once_with(
                     model="gemini-embedding-001",
-                    contents="Machine learning is fun"
+                    contents="Machine learning is fun",
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=1536
+                    )
                 )
     finally:
         sync_engine.dispose()
@@ -209,7 +213,7 @@ async def test_process_recording_with_rag(subject, teacher_user):
             chapter_id=chapter.id,
             document_id=doc.id,
             chunk_text="Derivative represents the rate of change.",
-            embedding_vector=[0.05] * 3072
+            embedding_vector=[0.05] * 1536
         )
         session.add(chunk)
 

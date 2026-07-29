@@ -49,7 +49,7 @@ async def test_chapter_knowledge_generation_and_api(client: AsyncClient, school_
             chapter_id=chapter.id,
             document_id=doc.id,
             chunk_text="Calculus is the mathematical study of continuous change. Limits are the foundation.",
-            embedding_vector=[0.1] * 3072
+            embedding_vector=[0.1] * 1536
         )
         session.add(chunk)
         await session.commit()

@@ -129,8 +129,8 @@ async def test_celery_task_processing(db_session: AsyncSession, subject):
             
             chunks = session.query(ChapterChunk).filter(ChapterChunk.document_id == doc.id).all()
             assert len(chunks) > 0
-            # Check padding: 768 elements in mock embedding + 768 zeros = 3072 total dimensions
-            assert len(chunks[0].embedding_vector) == 3072
+            # Check padding: 768 elements in mock embedding + 768 zeros = 1536 total dimensions
+            assert len(chunks[0].embedding_vector) == 1536
             # Assert first 768 elements are 0.1, rest are 0.0
             assert chunks[0].embedding_vector[:768] == [0.1] * 768
             assert chunks[0].embedding_vector[768:] == [0.0] * 768

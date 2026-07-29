@@ -14,7 +14,7 @@ def process_chapter_document(self, document_id: int):
     Celery task to process a ChapterDocument:
     1. Extract text
     2. Chunk content (heading-aware, fallback 800 tokens, 100 tokens overlap)
-    3. Generate embeddings using Google's gemini-embedding-001
+    3. Generate embeddings using Google's text-embedding-004
     4. Pad embeddings to 1536 dimensions (to fit db schema)
     5. Save chunks and embeddings to database
     6. Update status (PENDING -> PROCESSING -> COMPLETED/FAILED)
@@ -92,16 +92,21 @@ def process_chapter_document(self, document_id: int):
             for idx in range(0, len(chunks), batch_size):
                 batch_texts = chunks[idx : idx + batch_size]
                 
+                from google.genai import types
+
                 response = genai_client.models.embed_content(
-                           model="gemini-embedding-001",
-                           contents=batch_texts,
+                    model="gemini-embedding-001",
+                    contents=batch_texts,
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=1536
                     )
+                )
                 
                 # Retrieve and pad embeddings
                 # text-embedding-004 yields 768 dimensions. We pad to 1536 with 0s.
                 for text, emb in zip(batch_texts, response.embeddings):
                     raw_vector = emb.values
-                    padded_vector = raw_vector + [0.0] * (3072 - len(raw_vector))
+                    padded_vector = raw_vector + [0.0] * (1536 - len(raw_vector))
                     embedded_chunks.append((text, padded_vector))
 
             # Delete any existing chunks for this document (re-processing safety)

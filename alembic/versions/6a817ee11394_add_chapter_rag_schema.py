@@ -52,7 +52,7 @@ def upgrade() -> None:
     sa.Column('document_id', sa.Integer(), nullable=False),
     sa.Column('chunk_text', sa.Text(), nullable=False),
     sa.Column('metadata_json', sa.JSON(), nullable=True),
-    sa.Column('embedding_vector', app.models.chapter_chunk.Vector(dim=3072), nullable=False),
+    sa.Column('embedding_vector', app.models.chapter_chunk.Vector(dim=1536), nullable=False),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['chapter_id'], ['chapters.id'], ),
     sa.ForeignKeyConstraint(['document_id'], ['chapter_documents.id'], ),

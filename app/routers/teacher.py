@@ -185,7 +185,7 @@ async def teacher_dashboard_summary(
         select(Subject)
         .options(
             selectinload(Subject.class_),
-            selectinload(Subject.recordings),
+            selectinload(Subject.recordings).selectinload(Recording.report),
         )
         .where(Subject.teacher_id == teacher.id)
         .order_by(Subject.name)
@@ -203,28 +203,33 @@ async def teacher_dashboard_summary(
             )
         )
 
-        recordings = subject.recordings
+        active_recordings = [
+            r
+            for r in subject.recordings
+            if not r.is_archived
+        ]
 
-        recording_count = len(
-            [
-                r
-                for r in recordings
-                if not r.is_archived
-            ]
-        )
+        recording_count = len(active_recordings)
+
+        scores = [
+            r.report.overall_score
+            for r in active_recordings
+            if r.report and r.report.overall_score is not None
+        ]
+        average_score = round(sum(scores) / len(scores), 1) if scores else None
 
         if recording_count == 0:
             status = "No Recording"
 
         elif any(
-            r.status.value == "processing"
-            for r in recordings
+            r.status.value in ["processing", "pending"]
+            for r in active_recordings
         ):
-            status = "Processing"
+            status = "Pending"
 
         elif any(
             r.status.value == "failed"
-            for r in recordings
+            for r in active_recordings
         ):
             status = "Failed"
 
@@ -241,6 +246,7 @@ async def teacher_dashboard_summary(
                 student_count=student_count,
                 recording_count=recording_count,
                 ai_status=status,
+                average_score=average_score,
             )
         )
 
@@ -298,11 +304,14 @@ async def list_subject_chapters(
     teacher=Depends(get_teacher),
 ):
     from app.models.chapter import Chapter
+    from app.models.recording import Recording
     from app.schemas.chapter import ChapterOut
     
-    await chapter_service.get_teacher_owned_subject(db,
-    subject_id,
-    teacher.id,)
+    await chapter_service.get_teacher_owned_subject(
+        db,
+        subject_id,
+        teacher.id,
+    )
     
     result = await db.execute(
         select(Chapter)
@@ -310,7 +319,48 @@ async def list_subject_chapters(
         .where(Chapter.subject_id == subject_id)
         .order_by(Chapter.created_at.asc())
     )
-    return list(result.scalars().all())
+    chapters = list(result.scalars().all())
+
+    rec_result = await db.execute(
+        select(Recording).where(
+            Recording.subject_id == subject_id,
+            Recording.is_archived == False,
+        )
+    )
+    all_recordings = rec_result.scalars().all()
+
+    out = []
+    for c in chapters:
+        recs = [
+            r
+            for r in all_recordings
+            if r.chapter_id == c.id
+            or (
+                r.chapter_id is None
+                and r.chapter_name
+                and r.chapter_name.strip().lower() == c.name.strip().lower()
+            )
+            or (
+                r.chapter_id is None
+                and not r.chapter_name
+                and len(chapters) == 1
+            )
+        ]
+
+        if not recs:
+            status = "No Recording"
+        elif any(r.status.value in ["pending", "processing"] for r in recs):
+            status = "Pending"
+        elif any(r.status.value == "failed" for r in recs):
+            status = "Failed"
+        else:
+            status = "Completed"
+
+        c_out = ChapterOut.model_validate(c)
+        c_out.ai_status = status
+        out.append(c_out)
+
+    return out
 
 
 @router.post(
@@ -329,32 +379,51 @@ async def create_subject_chapter(
     subject_id,
     teacher.id,)
 
-    # Prevent duplicate chapter names in the same subject
-    existing = await db.execute(
+    from app.models.learning_plan import LearningPlan
+
+    # Check if a chapter with this name already exists in the subject
+    existing_res = await db.execute(
         select(Chapter).where(
             Chapter.subject_id == subject_id,
-            func.lower(Chapter.name) == body.name.lower(),
+            func.lower(Chapter.name) == body.name.strip().lower(),
         )
     )
+    existing_chapter = existing_res.scalar_one_or_none()
 
-    if existing.scalar_one_or_none():
-        raise HTTPException(
-            status_code=400,
-            detail="A chapter with this name already exists.",
-        )
+    if existing_chapter:
+        # Chapter already exists -> add the Display Title as a new Learning Plan entry under it
+        display_title = (body.description or "").strip()
+        if display_title:
+            new_lp = LearningPlan(
+                chapter_id=existing_chapter.id,
+                topic_name=existing_chapter.name,
+                sub_topic=display_title,
+            )
+            db.add(new_lp)
+            await db.commit()
+        return existing_chapter
 
+    # Create new chapter
     chapter = Chapter(
         subject_id=subject_id,
         name=body.name.strip(),
         description=body.description,
     )
-
     db.add(chapter)
-
     await db.commit()
+    await db.flush()
+
+    display_title = (body.description or "").strip()
+    if display_title:
+        new_lp = LearningPlan(
+            chapter_id=chapter.id,
+            topic_name=chapter.name,
+            sub_topic=display_title,
+        )
+        db.add(new_lp)
+        await db.commit()
 
     await db.refresh(chapter)
-
     return chapter
 
 
@@ -591,6 +660,7 @@ async def list_recordings(
     query = ( select(Recording)
         .options(
         selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
         selectinload(Recording.chapter)
         .selectinload(Chapter.documents),
         selectinload(Recording.chapter)
@@ -621,6 +691,7 @@ async def upload_recording(
     subject_id: int,
     file: UploadFile = File(...),
     chapter_id: int = Form(...),
+    learning_plan_id: int | None = Form(None),
     lecture_title: str | None = Form(None),
     description: str | None = Form(None),
     transcription: str | None = Form(None),
@@ -657,6 +728,7 @@ async def upload_recording(
     recording = Recording(
         subject_id=subject_id,
         chapter_id=chapter_id,
+        learning_plan_id=learning_plan_id,
         teacher_id=teacher.id,
         chapter_name=chapter_obj.name,
         lecture_title=lecture_title or None,
@@ -676,6 +748,7 @@ async def upload_recording(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -696,6 +769,7 @@ async def retry_recording(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -720,6 +794,7 @@ async def retry_recording(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -740,6 +815,7 @@ async def get_report(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -766,6 +842,7 @@ async def update_recording(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -795,6 +872,7 @@ async def archive_recording(
         select(Recording)
         .options(
             selectinload(Recording.report),
+        selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)

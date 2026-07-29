@@ -60,13 +60,18 @@ def retrieve_chapter_context(session: Session, chapter_id: int, transcript: str)
     # text-embedding-004 token limit is ~2048, so we truncate if it's too long
     truncated_transcript = transcript[:8000]
     
+    from google.genai import types
+
     response = client.models.embed_content(
         model="gemini-embedding-001",
-        contents=truncated_transcript
+        contents=truncated_transcript,
+        config=types.EmbedContentConfig(
+            output_dimensionality=1536
+        )
     )
     
     raw_vector = response.embeddings[0].values
-    padded_vector = raw_vector + [0.0] * (3072 - len(raw_vector))
+    padded_vector = raw_vector + [0.0] * (1536 - len(raw_vector))
 
     # Search ChapterChunk table
     # We use <=> for cosine distance in pgvector

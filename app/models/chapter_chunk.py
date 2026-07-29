@@ -47,7 +47,7 @@ class ChapterChunk(Base):
     ))
     chunk_text: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    embedding_vector: Mapped[list[float]] = mapped_column(Vector(3072))
+    embedding_vector: Mapped[list[float]] = mapped_column(Vector(1536))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     chapter: Mapped["Chapter"] = relationship("Chapter", back_populates="chunks")

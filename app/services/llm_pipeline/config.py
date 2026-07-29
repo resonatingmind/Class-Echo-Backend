@@ -33,6 +33,9 @@ Learning Objectives: {learning_objectives}
 Key Concepts / Must-Cover Concepts: {key_concepts}
 Must-Cover Topics: {must_cover_topics}
 
+--- LECTURE LEARNING PLAN (MICRO PLANNER) ---
+{learning_plan_info}
+
 Retrieved Reference Chunks:
 {retrieved_chunks}
 --------------
@@ -44,7 +47,7 @@ Please evaluate the lecture transcript against this reference context.
 Score each dimension strictly and provide:
 - A score within the stated maximum
 - One precise finding sentence (what you observed, not generic)
-- 2-3 short evidence quotes from the transcript (format: "finding text... 'quote'")
+- 2–3 short evidence quotes from the transcript (format: "finding text... 'quote'")
 
 | Dimension | Max | Scoring Rules & Criteria |
 |---|---|---|

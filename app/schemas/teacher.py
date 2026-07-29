@@ -37,6 +37,7 @@ class TeacherSubjectSummary(BaseModel):
     id: int
     name: str
     class_name: str
+    section: str | None = None
     chapter_count: int
     recording_count: int
 
@@ -68,34 +69,27 @@ class TeacherProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @model_validator(mode="after")
-    def sign_s3_url(self):
+    def sign_s3_url(self) -> "TeacherProfileOut":
         if self.profile_image_url:
             self.profile_image_url = sign_url(self.profile_image_url)
         return self
-    # class Config:
-    #     from_attributes = True
 
 class TeacherDashboardSubjectOut(BaseModel):
     subject_id: int
-
     subject_name: str
-
     class_name: str
-
     section: str
-
     academic_year: str
-
     student_count: int
-
     recording_count: int
-
     ai_status: Literal[
         "No Recording",
         "Processing",
+        "Pending",
         "Completed",
         "Failed",
     ]
+    average_score: float | None = None
 
 
 class TeacherDashboardOut(BaseModel):

@@ -89,15 +89,18 @@ async def get_teacher_profile(
         chapter_count = subject_counts.chapter_count if subject_counts else 0
         recording_count = subject_counts.recording_count if subject_counts else 0
 
-        # Resolve class safety fallback strings
+        # Resolve class & section safety fallback strings
         c_name = subject.class_.name if subject.class_ else "Unassigned Class"
-        class_names.add(c_name)
+        sec = subject.class_.section if (subject.class_ and subject.class_.section) else "A"
+        class_label = f"{c_name} • Section {sec}" if sec else c_name
+        class_names.add(class_label)
 
         subjects.append(
             TeacherSubjectSummary(
                 id=subject.id,
                 name=subject.name,
                 class_name=c_name,
+                section=sec,
                 chapter_count=chapter_count,
                 recording_count=recording_count,
             )

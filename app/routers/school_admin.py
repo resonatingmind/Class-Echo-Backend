@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from datetime import datetime
+
 from app.database import get_db
 from app.core.deps import get_school_admin
 from app.models.class_ import Class
@@ -16,9 +17,8 @@ from app.models.llm_report import LLMReport
 from app.schemas.class_ import ClassCreate, ClassUpdate, ClassOut
 from app.schemas.school import SchoolOut
 from app.schemas.school_admin import SchoolAdminProfileOut, SchoolAdminUpdate
-from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest
-from app.schemas.subject import SubjectWithClassOut
-from app.schemas.teacher import TeacherCreate, TeacherOut
+from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest, SubjectWithClassOut
+from app.schemas.teacher import TeacherCreate, TeacherOut, TeacherProfileOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut, ChapterKnowledgeOut
@@ -28,6 +28,8 @@ from app.schemas.school_dashboard import (
     TeacherRankingOut,
     RecentActivityOut,
 )
+from app.schemas.teacher_analytics import TeacherAnalyticsOut
+from app.schemas.teacher_recordings import TeacherRecordingOut
 from app.core.security import hash_password
 from app.services.s3_service import upload_image, upload_document
 from app.services import chapter_service
@@ -46,17 +48,10 @@ from app.services.recording_detail_service import (
     get_recording_detail,
 )
 from app.models.chapter_document import ChapterDocument
-
-from app.schemas.teacher_analytics import TeacherAnalyticsOut
-from app.schemas.teacher_recordings import TeacherRecordingOut
-from app.schemas.recording import RecordingWithReport
-
 from app.services.teacher_analytics_filters_service import (
     get_teacher_analytics_filters,
     AnalyticsFiltersOut,
 )
-from fastapi import Query
-
 from app.services.teacher_profile_service import get_teacher_profile
 from app.schemas.teacher import TeacherProfileOut
 from app.schemas.lookup import ( TeacherLookupOut, ClassLookupOut, SubjectLookupOut, )
@@ -491,8 +486,6 @@ async def school_recording_detail(
 
     return recording
 
-
-
 # ─── Classes ──────────────────────────────────────────────────────────────────
 
 @router.get("/classes", response_model=list[ClassOut])
@@ -743,27 +736,6 @@ async def update_subject(
     )
     return result.scalar_one()
 
-
-# @router.put("/subjects/{subject_id}/assign-teacher", response_model=SubjectOut)
-# async def assign_teacher(
-#     subject_id: int,
-#     body: AssignTeacherRequest,
-#     db: AsyncSession = Depends(get_db),
-#     school_admin=Depends(get_school_admin),
-# ):
-#     subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
-
-#     teacher = await db.get(Teacher, body.teacher_id)
-#     if not teacher or teacher.school_id != school_admin.school_id:
-#         raise HTTPException(status_code=404, detail="Teacher not found")
-
-#     subject.teacher_id = body.teacher_id
-#     await db.commit()
-
-#     result = await db.execute(
-#         select(Subject).options(selectinload(Subject.teacher)).where(Subject.id == subject.id)
-#     )
-#     return result.scalar_one()
 
 @router.put("/subjects/{subject_id}/assign-teacher", response_model=SubjectOut)
 async def assign_teacher(
