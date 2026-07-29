@@ -18,6 +18,9 @@ class Recording(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"))
     chapter_id: Mapped[int | None] = mapped_column(ForeignKey("chapters.id"), nullable=True)
+    learning_plan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("learning_plans.id", ondelete="SET NULL"), nullable=True
+    )
     teacher_id: Mapped[int] = mapped_column(ForeignKey("teachers.id"))
     chapter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lecture_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -38,3 +41,4 @@ class Recording(Base):
     teacher: Mapped["Teacher"] = relationship("Teacher", back_populates="recordings")
     report: Mapped["LLMReport | None"] = relationship("LLMReport", back_populates="recording", uselist=False, cascade="all, delete-orphan")
     chapter: Mapped["Chapter | None"] = relationship("Chapter", back_populates="recordings")
+    learning_plan: Mapped["LearningPlan | None"] = relationship("LearningPlan", back_populates="recordings")

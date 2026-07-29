@@ -20,6 +20,7 @@ class ChapterOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     document_count: int = 0
+    ai_status: str | None = None
 
     class Config:
         from_attributes = True

@@ -37,6 +37,7 @@ class TeacherSubjectSummary(BaseModel):
     id: int
     name: str
     class_name: str
+    section: str | None = None
     chapter_count: int
     recording_count: int
 
@@ -84,9 +85,11 @@ class TeacherDashboardSubjectOut(BaseModel):
     ai_status: Literal[
         "No Recording",
         "Processing",
+        "Pending",
         "Completed",
         "Failed",
     ]
+    average_score: float | None = None
 
 
 class TeacherDashboardOut(BaseModel):
