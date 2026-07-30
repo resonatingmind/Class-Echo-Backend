@@ -27,9 +27,23 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy import select
 
 import app.models  # noqa: F401 — registers all models with Base.metadata
+from app.config import settings
 from app.core.security import create_access_token, hash_password
 from app.database import AsyncSessionLocal, Base, engine, get_db
 from app.main import app
+
+# clean_db below wipes every row from every table after every test. Refuse to
+# run unless DATABASE_URL clearly points at a disposable test database —
+# otherwise a local test run silently wipes real dev/prod data (this has
+# already happened once and deleted the seeded admin from the dev DB).
+if "test" not in settings.DATABASE_URL.rsplit("/", 1)[-1].lower():
+    raise RuntimeError(
+        "Refusing to run tests: DATABASE_URL does not point at a database "
+        "with 'test' in its name. tests/conftest.py deletes ALL rows from "
+        "ALL tables after every test. Point DATABASE_URL (or set a separate "
+        "TEST_DATABASE_URL and export it as DATABASE_URL before running "
+        "pytest) at a dedicated test database first."
+    )
 from app.models.admin import Admin
 from app.models.class_ import Class
 from app.models.recording import Recording

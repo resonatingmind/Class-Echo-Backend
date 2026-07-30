@@ -8,6 +8,9 @@ class SchoolAdminProfileOut(BaseModel):
     id: int
     name: str
     email: str
+    status: str
+    email_verified: bool
+    rejected_reason: str | None = None
     profile_pic_url: str | None
     school_id: int
     school_name: str

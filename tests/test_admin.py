@@ -80,7 +80,7 @@ async def test_create_school(client, admin_token, admin_user):
     assert data["admin"]["email"] == SCHOOL_PAYLOAD["admin_email"]
 
 
-async def test_create_school_auto_creates_admin(client, db_session, admin_token, admin_user):
+async def test_create_school_auto_creates_admin(client, admin_token, admin_user):
     """After creating a school, a SchoolAdmin row must exist linked to it."""
     resp = await client.post(
         "/admin/schools",
@@ -90,12 +90,14 @@ async def test_create_school_auto_creates_admin(client, db_session, admin_token,
     assert resp.status_code == 201
     school_id = resp.json()["id"]
 
-    result = await db_session.execute(
-        select(SchoolAdmin).where(SchoolAdmin.school_id == school_id)
+    get_resp = await client.get(
+        f"/admin/schools/{school_id}",
+        headers={"Authorization": admin_token},
     )
-    school_admin = result.scalar_one_or_none()
-    assert school_admin is not None
-    assert school_admin.email == SCHOOL_PAYLOAD["admin_email"]
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data["admin"] is not None
+    assert data["admin"]["email"] == SCHOOL_PAYLOAD["admin_email"]
 
 
 async def test_create_school_duplicate_admin_email(client, admin_token, admin_user):
@@ -169,3 +171,43 @@ async def test_list_school_classes(client, admin_token, school, class_):
     assert resp.status_code == 200
     ids = [c["id"] for c in resp.json()]
     assert class_.id in ids
+
+
+# ── School Admin status management endpoints ───────────────────────────────────
+
+async def test_approve_school(client, admin_token, school, school_admin_user):
+    resp = await client.post(
+        f"/admin/schools/{school.id}/approve",
+        headers={"Authorization": admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["admin"]["status"] == "active"
+
+
+async def test_reject_school(client, admin_token, school, school_admin_user):
+    resp = await client.post(
+        f"/admin/schools/{school.id}/reject",
+        json={"reason": "Incorrect details"},
+        headers={"Authorization": admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["admin"]["status"] == "rejected"
+    assert resp.json()["admin"]["rejected_reason"] == "Incorrect details"
+
+
+async def test_suspend_school(client, admin_token, school, school_admin_user):
+    resp = await client.post(
+        f"/admin/schools/{school.id}/suspend",
+        headers={"Authorization": admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["admin"]["status"] == "suspended"
+
+
+async def test_reactivate_school(client, admin_token, school, school_admin_user):
+    resp = await client.post(
+        f"/admin/schools/{school.id}/reactivate",
+        headers={"Authorization": admin_token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["admin"]["status"] == "active"

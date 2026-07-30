@@ -7,15 +7,17 @@ services:
     ports:
       - "8000:8000"  # Exposes port 8000 to your machine
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     env_file:
       - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://scholar:scholar@postgres:5432/scholarmetric
       - REDIS_URL=redis://redis:6379/0
     restart: unless-stopped
-    
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -26,6 +28,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scholar -d scholarmetric"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   redis:

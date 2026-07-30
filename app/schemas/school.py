@@ -23,6 +23,9 @@ class SchoolAdminOut(BaseModel):
     id: int
     name: str
     email: str
+    status: str
+    email_verified: bool
+    rejected_reason: str | None = None
 
     class Config:
         from_attributes = True
@@ -44,3 +47,8 @@ class SchoolOut(BaseModel):
         if self.logo_url:
             self.logo_url = sign_url(self.logo_url)
         return self
+
+
+class SchoolRejectPayload(BaseModel):
+    reason: str | None = None
+

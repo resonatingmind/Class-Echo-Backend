@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.core.security import verify_password, hash_password, create_access_token
-from app.schemas.auth import LoginRequest, TokenResponse, StudentSignupRequest
+from app.schemas.auth import LoginRequest, TokenResponse, StudentSignupRequest, SchoolRegisterRequest, TeacherRegisterRequest
 from app.models.admin import Admin
 from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
@@ -94,3 +94,59 @@ async def student_signup(body: StudentSignupRequest, db: AsyncSession = Depends(
 
     token = create_access_token({"sub": str(student.id), "role": "student"})
     return TokenResponse(access_token=token, role="student")
+
+
+@router.post("/school/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def school_register(body: SchoolRegisterRequest, db: AsyncSession = Depends(get_db)):
+    # Check email not already taken across all user tables
+    for _, Model in ROLE_MODELS:
+        result = await db.execute(select(Model).where(Model.email == body.admin_email))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email already registered")
+
+    school = School(name=body.school_name, address=body.school_address)
+    db.add(school)
+    await db.flush()  # get school.id
+
+    school_admin = SchoolAdmin(
+        name=body.admin_name,
+        email=body.admin_email,
+        hashed_password=hash_password(body.admin_password),
+        school_id=school.id,
+        status="pending_approval",
+        email_verified=True,
+    )
+    db.add(school_admin)
+    await db.commit()
+    await db.refresh(school_admin)
+
+    token_data = {"sub": str(school_admin.id), "role": "school_admin", "school_id": school.id}
+    token = create_access_token(token_data)
+    return TokenResponse(access_token=token, role="school_admin")
+
+
+@router.post("/teacher/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depends(get_db)):
+    # Validate school exists
+    school = await db.get(School, body.school_id)
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+
+    # Check email not already taken across all user tables
+    for _, Model in ROLE_MODELS:
+        result = await db.execute(select(Model).where(Model.email == body.email))
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email already registered")
+
+    teacher = Teacher(
+        name=body.name,
+        email=body.email,
+        hashed_password=hash_password(body.password),
+        school_id=body.school_id,
+    )
+    db.add(teacher)
+    await db.commit()
+    await db.refresh(teacher)
+
+    token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
+    return TokenResponse(access_token=token, role="teacher")

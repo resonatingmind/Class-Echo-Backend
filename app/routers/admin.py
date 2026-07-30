@@ -13,7 +13,7 @@ from app.models.subject import Subject
 from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
-from app.schemas.school import SchoolCreate, SchoolUpdate, SchoolOut
+from app.schemas.school import SchoolCreate, SchoolUpdate, SchoolOut, SchoolRejectPayload
 from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
 from app.schemas.student import StudentOut
@@ -141,6 +141,88 @@ async def delete_school(
     )
     await db.delete(school)
     await db.commit()
+
+
+@router.post("/schools/{school_id}/approve", response_model=SchoolOut)
+async def approve_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if not school.admin:
+        raise HTTPException(status_code=400, detail="School has no admin linked")
+    school.admin.status = "active"
+    await db.commit()
+    await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/reject", response_model=SchoolOut)
+async def reject_school(
+    school_id: int,
+    body: SchoolRejectPayload,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if not school.admin:
+        raise HTTPException(status_code=400, detail="School has no admin linked")
+    school.admin.status = "rejected"
+    school.admin.rejected_reason = body.reason
+    await db.commit()
+    await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/suspend", response_model=SchoolOut)
+async def suspend_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if not school.admin:
+        raise HTTPException(status_code=400, detail="School has no admin linked")
+    school.admin.status = "suspended"
+    await db.commit()
+    await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/reactivate", response_model=SchoolOut)
+async def reactivate_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if not school.admin:
+        raise HTTPException(status_code=400, detail="School has no admin linked")
+    school.admin.status = "active"
+    await db.commit()
+    await db.refresh(school)
+    return school
 
 
 @router.get("/schools/{school_id}/classes", response_model=list[ClassOut])

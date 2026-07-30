@@ -143,3 +143,64 @@ async def test_student_signup_class_wrong_school(client, school, class_):
         },
     )
     assert resp.status_code == 404
+
+
+# ── School & Teacher registration tests ───────────────────────────────────────
+
+async def test_school_register_success(client):
+    resp = await client.post(
+        "/auth/school/register",
+        json={
+            "school_name": "New Registered School",
+            "school_address": "456 Academy Road",
+            "admin_name": "Reg Admin",
+            "admin_email": "regadmin@test.com",
+            "admin_password": "password123",
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["role"] == "school_admin"
+    assert len(data["access_token"]) > 20
+
+
+async def test_school_register_duplicate_email(client, admin_user):
+    resp = await client.post(
+        "/auth/school/register",
+        json={
+            "school_name": "Another School",
+            "admin_name": "Admin",
+            "admin_email": admin_user.email,  # duplicate
+            "admin_password": "password123",
+        },
+    )
+    assert resp.status_code == 409
+
+
+async def test_teacher_register_success(client, school):
+    resp = await client.post(
+        "/auth/teacher/register",
+        json={
+            "name": "New Teacher",
+            "email": "newteacher@test.com",
+            "password": "password123",
+            "school_id": school.id,
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["role"] == "teacher"
+    assert len(data["access_token"]) > 20
+
+
+async def test_teacher_register_bad_school(client):
+    resp = await client.post(
+        "/auth/teacher/register",
+        json={
+            "name": "Teacher",
+            "email": "teacher_bad_school@test.com",
+            "password": "password123",
+            "school_id": 99999,
+        },
+    )
+    assert resp.status_code == 404

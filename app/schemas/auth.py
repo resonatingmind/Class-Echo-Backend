@@ -19,3 +19,18 @@ class StudentSignupRequest(BaseModel):
     mobile_number: str | None = None
     school_id: int
     class_id: int
+
+
+class SchoolRegisterRequest(BaseModel):
+    school_name: str
+    school_address: str | None = None
+    admin_name: str
+    admin_email: EmailStr
+    admin_password: str
+
+
+class TeacherRegisterRequest(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    school_id: int
