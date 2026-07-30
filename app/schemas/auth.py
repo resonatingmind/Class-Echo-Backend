@@ -34,3 +34,8 @@ class TeacherRegisterRequest(BaseModel):
     email: EmailStr
     password: str
     school_id: int
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    password: str

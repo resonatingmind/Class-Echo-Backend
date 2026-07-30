@@ -266,6 +266,7 @@ async def test_cannot_get_other_teachers_report(
         name="Teacher B",
         email="teacherb@test.com",
         hashed_password=hash_password("pass"),
+        status="active",
     )
     db_session.add(teacher_b)
     await db_session.flush()

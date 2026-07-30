@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from app.models.chapter import Chapter
 
 from app.database import get_db
-from app.core.deps import get_teacher
+from app.core.deps import get_teacher, get_active_teacher
 from app.models.subject import Subject
 from app.models.recording import Recording
 from app.models.student import Student
@@ -48,7 +48,7 @@ router = APIRouter()
 @router.get("/timetable", response_model=list[TimetableEntryOut])
 async def get_my_timetable(
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     """A teacher can view their full weekly timetable but cannot edit it —
     only the school admin manages the schedule."""
@@ -76,6 +76,9 @@ def _teacher_out(teacher) -> TeacherOut:
         profile_image_url=teacher.profile_image_url,
         school_id=teacher.school_id,
         school_name=teacher.school.name if teacher.school else None,
+        status=teacher.status,
+        email_verified=teacher.email_verified,
+        rejected_reason=teacher.rejected_reason,
         created_at=teacher.created_at,
     )
 
@@ -120,7 +123,7 @@ async def get_my_profile(teacher=Depends(get_teacher)):
 async def update_my_profile(
     body: TeacherUpdate,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(teacher, field, value)
@@ -133,7 +136,7 @@ async def update_my_profile(
 async def upload_profile_image(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await upload_image(file, folder=f"classecho/teachers/{teacher.id}")
     teacher.profile_image_url = result["url"]
@@ -146,7 +149,7 @@ async def upload_profile_image(
 async def list_subject_students(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     subject = await chapter_service.get_teacher_owned_subject(db,
     subject_id,
@@ -162,7 +165,7 @@ async def list_subject_students(
 @router.get("/subjects", response_model=list[SubjectWithClassOut])
 async def list_my_subjects(
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Subject)
@@ -179,7 +182,7 @@ async def list_my_subjects(
 )
 async def teacher_dashboard_summary(
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     subjects_result = await db.execute(
         select(Subject)
@@ -263,7 +266,7 @@ async def teacher_dashboard_summary(
 async def delete_teacher_chapter(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     chapter = await chapter_service.get_teacher_owned_chapter(
         db,
@@ -289,7 +292,7 @@ async def delete_teacher_chapter(
 async def get_my_subject(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     subject = await chapter_service.get_teacher_owned_subject(db,
     subject_id,
@@ -301,7 +304,7 @@ async def get_my_subject(
 async def list_subject_chapters(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     from app.models.chapter import Chapter
     from app.models.recording import Recording
@@ -372,7 +375,7 @@ async def create_subject_chapter(
     subject_id: int,
     body: ChapterCreate,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     # Verify the subject belongs to the logged-in teacher
     await chapter_service.get_teacher_owned_subject(db,
@@ -436,7 +439,7 @@ async def update_teacher_chapter(
     chapter_id: int,
     body: ChapterUpdate,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     chapter = await chapter_service.get_teacher_owned_chapter(
         db,
@@ -480,7 +483,7 @@ async def update_teacher_chapter(
 async def get_teacher_chapter_details(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     chapter = await chapter_service.get_teacher_owned_chapter(
         db,
@@ -499,7 +502,7 @@ async def get_teacher_chapter_details(
 async def list_teacher_chapter_documents(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     chapter = await chapter_service.get_teacher_owned_chapter(
         db,
@@ -528,7 +531,7 @@ async def list_teacher_chapter_documents(
 async def get_teacher_chapter_knowledge(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     await chapter_service.get_teacher_owned_chapter(
         db,
@@ -561,7 +564,7 @@ async def upload_teacher_chapter_document(
     chapter_id: int,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     # Verify teacher owns this chapter
     await chapter_service.get_teacher_owned_chapter(
@@ -605,7 +608,7 @@ async def upload_teacher_chapter_document(
 async def delete_teacher_chapter_document(
     document_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(ChapterDocument)
@@ -635,7 +638,7 @@ async def list_recordings(
     subject_id: int,
     chapter_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     await chapter_service.get_teacher_owned_subject(db,
     subject_id,
@@ -697,7 +700,7 @@ async def upload_recording(
     transcription: str | None = Form(None),
     duration_seconds: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     from app.models.chapter import Chapter
 
@@ -763,7 +766,7 @@ async def upload_recording(
 async def retry_recording(
     recording_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Recording)
@@ -809,7 +812,7 @@ async def retry_recording(
 async def get_report(
     recording_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Recording)
@@ -836,7 +839,7 @@ async def update_recording(
     recording_id: int,
     body: RecordingUpdate,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Recording)
@@ -866,7 +869,7 @@ async def update_recording(
 async def archive_recording(
     recording_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Recording)
@@ -894,7 +897,7 @@ async def archive_recording(
 async def delete_recording(
     recording_id: int,
     db: AsyncSession = Depends(get_db),
-    teacher=Depends(get_teacher),
+    teacher=Depends(get_active_teacher),
 ):
     result = await db.execute(
         select(Recording)

@@ -4,8 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.core.security import verify_password, hash_password, create_access_token
-from app.schemas.auth import LoginRequest, TokenResponse, StudentSignupRequest, SchoolRegisterRequest, TeacherRegisterRequest
+from app.core.security import verify_password, hash_password, create_access_token, decode_token
+from app.schemas.auth import LoginRequest, TokenResponse, StudentSignupRequest, SchoolRegisterRequest, TeacherRegisterRequest, AcceptInviteRequest
 from app.models.admin import Admin
 from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
@@ -143,10 +143,39 @@ async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depe
         email=body.email,
         hashed_password=hash_password(body.password),
         school_id=body.school_id,
+        status="pending_approval",
     )
     db.add(teacher)
     await db.commit()
     await db.refresh(teacher)
+
+    token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
+    return TokenResponse(access_token=token, role="teacher")
+
+
+@router.post("/accept-invite", response_model=TokenResponse)
+async def accept_invite(body: AcceptInviteRequest, db: AsyncSession = Depends(get_db)):
+    from jose import JWTError
+    try:
+        payload = decode_token(body.token)
+        teacher_id = int(payload.get("sub"))
+        role = payload.get("role")
+    except (JWTError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+
+    if role != "teacher":
+        raise HTTPException(status_code=400, detail="Invalid token role")
+
+    teacher = await db.get(Teacher, teacher_id)
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    if teacher.status != "invited":
+        raise HTTPException(status_code=400, detail="Invite has already been accepted or is invalid")
+
+    teacher.hashed_password = hash_password(body.password)
+    teacher.status = "active"
+    await db.commit()
 
     token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
     return TokenResponse(access_token=token, role="teacher")

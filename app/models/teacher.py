@@ -13,6 +13,9 @@ class Teacher(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     profile_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     school_id: Mapped[int | None] = mapped_column(ForeignKey("schools.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(50), default="pending_approval", server_default="pending_approval")
+    email_verified: Mapped[bool] = mapped_column(default=True, server_default="true")
+    rejected_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     school: Mapped["School | None"] = relationship("School")

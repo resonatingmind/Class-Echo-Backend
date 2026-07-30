@@ -18,6 +18,9 @@ class TeacherOut(BaseModel):
     profile_image_url: str | None
     school_id: int | None
     school_name: str | None = None
+    status: str
+    email_verified: bool
+    rejected_reason: str | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -94,3 +97,12 @@ class TeacherDashboardSubjectOut(BaseModel):
 
 class TeacherDashboardOut(BaseModel):
     subjects: list[TeacherDashboardSubjectOut]
+
+
+class TeacherInvite(BaseModel):
+    name: str
+    email: EmailStr
+
+
+class TeacherReject(BaseModel):
+    reason: str | None = None

@@ -94,6 +94,14 @@ async def get_teacher(
     return teacher
 
 
+async def get_active_teacher(
+    teacher: Teacher = Depends(get_teacher),
+) -> Teacher:
+    if teacher.status != "active":
+        raise HTTPException(status_code=403, detail="Teacher account is not active")
+    return teacher
+
+
 async def get_student(current=Depends(get_current_user)):
     user, role = current
     if role != "student":

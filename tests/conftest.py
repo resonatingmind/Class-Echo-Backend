@@ -231,11 +231,13 @@ async def class_(db_session, school):
 
 
 @pytest_asyncio.fixture
-async def teacher_user(db_session):
+async def teacher_user(db_session, school):
     t = Teacher(
         name="Test Teacher",
         email="teacher@test.com",
         hashed_password=hash_password("testpass"),
+        school_id=school.id,
+        status="active",
     )
     db_session.add(t)
     await db_session.commit()
