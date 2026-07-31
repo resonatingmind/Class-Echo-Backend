@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from app.database import get_db
 from app.core.deps import get_school_admin, get_active_school_admin
+from app.models.chapter import Chapter
 from app.models.class_ import Class
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
@@ -22,7 +23,6 @@ from app.schemas.teacher import (
     TeacherOut,
     TeacherProfileOut,
     TeacherInviteRequest,
-    TeacherInvite,
     TeacherRejectRequest,
 )
 from app.schemas.recording import RecordingWithReport, LLMReportOut
@@ -58,7 +58,6 @@ from app.services.teacher_analytics_filters_service import (
     AnalyticsFiltersOut,
 )
 from app.services.teacher_profile_service import get_teacher_profile
-from app.schemas.teacher import TeacherProfileOut
 from app.schemas.lookup import ( TeacherLookupOut, ClassLookupOut, SubjectLookupOut, )
 
 from app.schemas.quick_assignment import (
@@ -426,173 +425,6 @@ async def _get_owned_teacher(teacher_id: int, school_id: int, db: AsyncSession) 
         raise HTTPException(status_code=404, detail="Teacher not found")
     return teacher
 
-
-@router.post("/teachers/invite", response_model=TeacherOut)
-async def invite_teacher(
-    body: TeacherInvite,
-    db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
-):
-    from app.models.admin import Admin
-    from app.models.school_admin import SchoolAdmin
-    from app.models.student import Student
-    for Model in (Admin, SchoolAdmin, Teacher, Student):
-        r = await db.execute(select(Model).where(Model.email == body.email))
-        if r.scalar_one_or_none():
-            raise HTTPException(status_code=409, detail="Email already registered")
-
-    teacher = Teacher(
-        name=body.name,
-        email=body.email,
-        hashed_password="",
-        school_id=school_admin.school_id,
-        status="invited",
-    )
-    db.add(teacher)
-    await db.commit()
-
-    result = await db.execute(
-        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher.id)
-    )
-    t = result.scalar_one()
-    return TeacherOut(
-        id=t.id,
-        name=t.name,
-        email=t.email,
-        profile_image_url=t.profile_image_url,
-        school_id=t.school_id,
-        school_name=t.school.name if t.school else None,
-        status=t.status,
-        email_verified=t.email_verified,
-        rejected_reason=t.rejected_reason,
-        created_at=t.created_at,
-    )
-
-
-@router.post("/teachers/{teacher_id}/approve", response_model=TeacherOut)
-async def approve_teacher(
-    teacher_id: int,
-    db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
-):
-    result = await db.execute(
-        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
-    )
-    teacher = result.scalar_one_or_none()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    teacher.status = "active"
-    await db.commit()
-    await db.refresh(teacher)
-
-    return TeacherOut(
-        id=teacher.id,
-        name=teacher.name,
-        email=teacher.email,
-        profile_image_url=teacher.profile_image_url,
-        school_id=teacher.school_id,
-        school_name=teacher.school.name if teacher.school else None,
-        status=teacher.status,
-        email_verified=teacher.email_verified,
-        rejected_reason=teacher.rejected_reason,
-        created_at=teacher.created_at,
-    )
-
-
-@router.post("/teachers/{teacher_id}/reject", response_model=TeacherOut)
-async def reject_teacher(
-    teacher_id: int,
-    body: TeacherReject,
-    db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
-):
-    result = await db.execute(
-        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
-    )
-    teacher = result.scalar_one_or_none()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    teacher.status = "rejected"
-    teacher.rejected_reason = body.reason
-    await db.commit()
-    await db.refresh(teacher)
-
-    return TeacherOut(
-        id=teacher.id,
-        name=teacher.name,
-        email=teacher.email,
-        profile_image_url=teacher.profile_image_url,
-        school_id=teacher.school_id,
-        school_name=teacher.school.name if teacher.school else None,
-        status=teacher.status,
-        email_verified=teacher.email_verified,
-        rejected_reason=teacher.rejected_reason,
-        created_at=teacher.created_at,
-    )
-
-
-@router.post("/teachers/{teacher_id}/suspend", response_model=TeacherOut)
-async def suspend_teacher(
-    teacher_id: int,
-    db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
-):
-    result = await db.execute(
-        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
-    )
-    teacher = result.scalar_one_or_none()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    teacher.status = "suspended"
-    await db.commit()
-    await db.refresh(teacher)
-
-    return TeacherOut(
-        id=teacher.id,
-        name=teacher.name,
-        email=teacher.email,
-        profile_image_url=teacher.profile_image_url,
-        school_id=teacher.school_id,
-        school_name=teacher.school.name if teacher.school else None,
-        status=teacher.status,
-        email_verified=teacher.email_verified,
-        rejected_reason=teacher.rejected_reason,
-        created_at=teacher.created_at,
-    )
-
-
-@router.post("/teachers/{teacher_id}/reactivate", response_model=TeacherOut)
-async def reactivate_teacher(
-    teacher_id: int,
-    db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
-):
-    result = await db.execute(
-        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
-    )
-    teacher = result.scalar_one_or_none()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    teacher.status = "active"
-    await db.commit()
-    await db.refresh(teacher)
-
-    return TeacherOut(
-        id=teacher.id,
-        name=teacher.name,
-        email=teacher.email,
-        profile_image_url=teacher.profile_image_url,
-        school_id=teacher.school_id,
-        school_name=teacher.school.name if teacher.school else None,
-        status=teacher.status,
-        email_verified=teacher.email_verified,
-        rejected_reason=teacher.rejected_reason,
-        created_at=teacher.created_at,
-    )
 
 @router.get(
     "/teachers/{teacher_id}/subjects",

@@ -114,7 +114,3 @@ class TeacherDashboardOut(BaseModel):
 class TeacherInvite(BaseModel):
     name: str
     email: EmailStr
-
-
-class TeacherReject(BaseModel):
-    reason: str | None = None

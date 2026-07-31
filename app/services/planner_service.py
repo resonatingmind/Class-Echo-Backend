@@ -1,6 +1,5 @@
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.subject import Subject

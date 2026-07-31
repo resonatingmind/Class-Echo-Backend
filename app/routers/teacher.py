@@ -31,9 +31,6 @@ from app.models.chapter_document import ChapterDocument
 from app.schemas.chapter import ChapterDocumentOut
 from app.schemas.chapter import ChapterKnowledgeOut
 from app.services import chapter_knowledge_service
-from fastapi import File, UploadFile
-from app.models.chapter_document import ChapterDocument
-from app.schemas.chapter import ChapterDocumentOut
 from app.services.s3_service import upload_document
 from app.tasks.llm_tasks import process_recording
 
@@ -81,9 +78,6 @@ def _teacher_out(teacher) -> TeacherOut:
         email_verified=teacher.email_verified,
         rejected_reason=teacher.rejected_reason,
         created_at=teacher.created_at,
-        status=teacher.status,
-        email_verified=teacher.email_verified,
-        rejected_reason=teacher.rejected_reason,
     )
 
 
@@ -242,13 +236,6 @@ async def teacher_dashboard_summary(
 
         else:
             status = "Completed"
-
-        scores = [
-            float(r.report.overall_score)
-            for r in recordings
-            if not r.is_archived and r.report is not None and r.report.overall_score is not None
-        ]
-        average_score = round(sum(scores) / len(scores), 1) if scores else None
 
         dashboard.append(
             TeacherDashboardSubjectOut(

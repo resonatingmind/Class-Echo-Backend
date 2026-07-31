@@ -7,9 +7,6 @@ from app.models.subject import Subject
 from app.models.class_ import Class
 from app.schemas.chapter import ChapterCreate, ChapterUpdate,ChapterOut
 
-from app.models.subject import Subject
-from app.models.teacher import Teacher
-
 
 async def get_owned_subject(db: AsyncSession, subject_id: int, school_id: int) -> Subject:
     result = await db.execute(
