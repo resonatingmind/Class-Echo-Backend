@@ -14,7 +14,7 @@ import app.models.chapter_chunk
 
 # revision identifiers, used by Alembic.
 revision: str = '6a817ee11394'
-down_revision: Union[str, Sequence[str], None] = '0007'
+down_revision: Union[str, Sequence[str], None] = '0008'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
