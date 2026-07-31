@@ -22,6 +22,7 @@ from app.schemas.teacher import (
     TeacherOut,
     TeacherProfileOut,
     TeacherInviteRequest,
+    TeacherInvite,
     TeacherRejectRequest,
 )
 from app.schemas.recording import RecordingWithReport, LLMReportOut
