@@ -27,9 +27,9 @@ else:
     sys.exit(1)
 PY
 
-# Wipe the database first if requested
-if [ "${RESET_DB_ON_DEPLOY:-false}" = "true" ]; then
-    echo "RESET_DB_ON_DEPLOY=true -- wiping database schema completely"
+# Wipe the database first if requested in a test environment or explicitly enabled
+if [ "${RESET_DB_ON_STARTUP:-false}" = "true" ] || [ "${ENVIRONMENT:-}" = "test" ]; then
+    echo "Wiping database schema completely for clean migration run"
     python reset_db.py --yes
 fi
 

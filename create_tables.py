@@ -20,7 +20,7 @@ from app.database import Base, engine
 async def main():
     print("Connecting to database...")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        # await conn.run_sync(Base.metadata.create_all)  # Disabled to prevent conflicts with Alembic
     print("Done. Tables created (existing tables were skipped):")
     for table in sorted(Base.metadata.tables.keys()):
         print(f"  ✓ {table}")
