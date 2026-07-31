@@ -23,6 +23,24 @@ def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     
+    # Check learning_plans table
+    lp_cols = inspector.get_table_names()
+    if 'learning_plans' not in lp_cols:
+        op.create_table(
+            'learning_plans',
+            sa.Column('id', sa.Integer(), primary_key=True, index=True),
+            sa.Column('chapter_id', sa.Integer(), sa.ForeignKey('chapters.id', ondelete='CASCADE'), nullable=False, index=True),
+            sa.Column('date', sa.String(length=50), nullable=True),
+            sa.Column('topic_name', sa.String(length=255), nullable=False),
+            sa.Column('sub_topic', sa.String(length=255), nullable=False),
+            sa.Column('classwork_activities', sa.Text(), nullable=True),
+            sa.Column('assessment_task', sa.String(length=255), nullable=True),
+            sa.Column('teaching_aids', sa.String(length=255), nullable=True),
+            sa.Column('learning_outcomes', sa.Text(), nullable=True),
+            sa.Column('created_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
+            sa.Column('updated_at', sa.DateTime(), server_default=sa.func.now(), onupdate=sa.func.now(), nullable=False),
+        )
+    
     # Check recordings table
     rec_cols = [c['name'] for c in inspector.get_columns('recordings')]
     if 'learning_plan_id' not in rec_cols:
