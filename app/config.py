@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str | None = None
     ADMIN_PASSWORD: str | None = None
 
+    # Email (invite / verification links). If SMTP_HOST is unset, email_service
+    # logs the message instead of sending — safe default for local dev.
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM_EMAIL: str = "no-reply@classecho.app"
+    FRONTEND_URL: str = "http://localhost:5173"
+
     @field_validator(
         "DATABASE_URL",
         "SECRET_KEY",
@@ -35,6 +44,11 @@ class Settings(BaseSettings):
         "ADMIN_NAME",
         "ADMIN_EMAIL",
         "ADMIN_PASSWORD",
+        "SMTP_HOST",
+        "SMTP_USER",
+        "SMTP_PASSWORD",
+        "SMTP_FROM_EMAIL",
+        "FRONTEND_URL",
         mode="before",
     )
     @classmethod

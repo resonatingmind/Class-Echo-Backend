@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.core.deps import get_admin
-from app.core.security import hash_password
+from app.core.security import generate_token_pair, verify_password
+from app.config import settings
+from app.models.auth_token import AuthToken
+from app.tasks.email_tasks import send_email_task
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
 from app.models.class_ import Class
@@ -13,7 +18,14 @@ from app.models.subject import Subject
 from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
-from app.schemas.school import SchoolCreate, SchoolUpdate, SchoolOut, SchoolRejectPayload
+from app.schemas.school import (
+    SchoolCreate,
+    SchoolUpdate,
+    SchoolOut,
+    SchoolRejectRequest,
+    SchoolDeleteRequest,
+)
+from app.schemas.admin import AdminProfileOut
 from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
 from app.schemas.student import StudentOut
@@ -22,14 +34,23 @@ from app.schemas.recording import RecordingWithReport
 router = APIRouter()
 
 
+@router.get("/me", response_model=AdminProfileOut)
+async def get_my_profile(admin=Depends(get_admin)):
+    return admin
+
+
 @router.get("/schools", response_model=list[SchoolOut])
 async def list_schools(
+    status: str | None = Query(None, description="Filter by invited/pending_approval/active/suspended/rejected"),
     db: AsyncSession = Depends(get_db),
     _=Depends(get_admin),
 ):
-    result = await db.execute(
-        select(School).options(selectinload(School.admin)).order_by(School.created_at.desc())
-    )
+    query = select(School).options(selectinload(School.admin)).order_by(School.created_at.desc())
+    if status is not None:
+        query = query.join(SchoolAdmin, School.id == SchoolAdmin.school_id).where(
+            SchoolAdmin.status == status
+        )
+    result = await db.execute(query)
     return result.scalars().all()
 
 
@@ -37,7 +58,7 @@ async def list_schools(
 async def create_school(
     body: SchoolCreate,
     db: AsyncSession = Depends(get_db),
-    _=Depends(get_admin),
+    admin=Depends(get_admin),
 ):
     # Check admin email not already taken
     from app.models.admin import Admin
@@ -55,12 +76,35 @@ async def create_school(
     school_admin = SchoolAdmin(
         name=body.admin_name,
         email=body.admin_email,
-        hashed_password=hash_password(body.admin_password),
+        hashed_password=None,
         school_id=school.id,
+        status="invited",
+        invited_by_admin_id=admin.id,
     )
     db.add(school_admin)
+    await db.flush()  # get school_admin.id
+
+    raw_token, token_hash = generate_token_pair()
+    db.add(
+        AuthToken(
+            user_type="school_admin",
+            user_id=school_admin.id,
+            token_hash=token_hash,
+            purpose="invite",
+            expires_at=datetime.utcnow() + timedelta(days=7),
+        )
+    )
     await db.commit()
     await db.refresh(school)
+
+    invite_link = f"{settings.FRONTEND_URL}/accept-invite?token={raw_token}"
+    send_email_task.delay(
+        school_admin.email,
+        "You've been invited to Class Echo",
+        f"<p>Hi {school_admin.name},</p><p>You've been set up as the admin for "
+        f"{school.name} on Class Echo. Set your password to get started: "
+        f"<a href='{invite_link}'>{invite_link}</a></p>",
+    )
 
     result = await db.execute(
         select(School).options(selectinload(School.admin)).where(School.id == school.id)
@@ -109,9 +153,13 @@ async def update_school(
 @router.delete("/schools/{school_id}", status_code=204)
 async def delete_school(
     school_id: int,
+    body: SchoolDeleteRequest,
     db: AsyncSession = Depends(get_db),
-    _=Depends(get_admin),
+    admin=Depends(get_admin),
 ):
+    if not verify_password(body.password, admin.hashed_password):
+        raise HTTPException(status_code=403, detail="Incorrect password")
+
     result = await db.execute(select(School).where(School.id == school_id))
     school = result.scalar_one_or_none()
     if not school:
@@ -147,42 +195,34 @@ async def delete_school(
 async def approve_school(
     school_id: int,
     db: AsyncSession = Depends(get_db),
-    _=Depends(get_admin),
+    admin=Depends(get_admin),
 ):
-    result = await db.execute(
-        select(School).options(selectinload(School.admin)).where(School.id == school_id)
-    )
-    school = result.scalar_one_or_none()
-    if not school:
-        raise HTTPException(status_code=404, detail="School not found")
-    if not school.admin:
-        raise HTTPException(status_code=400, detail="School has no admin linked")
-    school.admin.status = "active"
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    if school_admin.status != "pending_approval":
+        raise HTTPException(status_code=400, detail="Only pending schools can be approved")
+
+    school_admin.status = "active"
+    school_admin.approved_at = datetime.utcnow()
+    school_admin.approved_by_admin_id = admin.id
     await db.commit()
-    await db.refresh(school)
-    return school
+    return await _get_school_with_admin(school_id, db)
 
 
 @router.post("/schools/{school_id}/reject", response_model=SchoolOut)
 async def reject_school(
     school_id: int,
-    body: SchoolRejectPayload,
+    body: SchoolRejectRequest,
     db: AsyncSession = Depends(get_db),
     _=Depends(get_admin),
 ):
-    result = await db.execute(
-        select(School).options(selectinload(School.admin)).where(School.id == school_id)
-    )
-    school = result.scalar_one_or_none()
-    if not school:
-        raise HTTPException(status_code=404, detail="School not found")
-    if not school.admin:
-        raise HTTPException(status_code=400, detail="School has no admin linked")
-    school.admin.status = "rejected"
-    school.admin.rejected_reason = body.reason
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    if school_admin.status != "pending_approval":
+        raise HTTPException(status_code=400, detail="Only pending schools can be rejected")
+
+    school_admin.status = "rejected"
+    school_admin.rejected_reason = body.reason
     await db.commit()
-    await db.refresh(school)
-    return school
+    return await _get_school_with_admin(school_id, db)
 
 
 @router.post("/schools/{school_id}/suspend", response_model=SchoolOut)
@@ -191,18 +231,13 @@ async def suspend_school(
     db: AsyncSession = Depends(get_db),
     _=Depends(get_admin),
 ):
-    result = await db.execute(
-        select(School).options(selectinload(School.admin)).where(School.id == school_id)
-    )
-    school = result.scalar_one_or_none()
-    if not school:
-        raise HTTPException(status_code=404, detail="School not found")
-    if not school.admin:
-        raise HTTPException(status_code=400, detail="School has no admin linked")
-    school.admin.status = "suspended"
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    if school_admin.status != "active":
+        raise HTTPException(status_code=400, detail="Only active schools can be suspended")
+
+    school_admin.status = "suspended"
     await db.commit()
-    await db.refresh(school)
-    return school
+    return await _get_school_with_admin(school_id, db)
 
 
 @router.post("/schools/{school_id}/reactivate", response_model=SchoolOut)
@@ -211,18 +246,28 @@ async def reactivate_school(
     db: AsyncSession = Depends(get_db),
     _=Depends(get_admin),
 ):
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    if school_admin.status != "suspended":
+        raise HTTPException(status_code=400, detail="Only suspended schools can be reactivated")
+
+    school_admin.status = "active"
+    await db.commit()
+    return await _get_school_with_admin(school_id, db)
+
+
+async def _get_school_admin_for_school(school_id: int, db: AsyncSession) -> SchoolAdmin:
+    result = await db.execute(select(SchoolAdmin).where(SchoolAdmin.school_id == school_id))
+    school_admin = result.scalar_one_or_none()
+    if not school_admin:
+        raise HTTPException(status_code=404, detail="School not found")
+    return school_admin
+
+
+async def _get_school_with_admin(school_id: int, db: AsyncSession) -> School:
     result = await db.execute(
         select(School).options(selectinload(School.admin)).where(School.id == school_id)
     )
-    school = result.scalar_one_or_none()
-    if not school:
-        raise HTTPException(status_code=404, detail="School not found")
-    if not school.admin:
-        raise HTTPException(status_code=400, detail="School has no admin linked")
-    school.admin.status = "active"
-    await db.commit()
-    await db.refresh(school)
-    return school
+    return result.scalar_one()
 
 
 @router.get("/schools/{school_id}/classes", response_model=list[ClassOut])
@@ -294,7 +339,7 @@ async def list_school_subject_recordings(
     await _get_school_subject(subject_id, school_id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(selectinload(Recording.report).selectinload(LLMReport.recording))
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )

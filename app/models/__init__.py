@@ -34,10 +34,11 @@ from app.models.chapter_chunk import ChapterChunk
 from app.models.chapter_knowledge import ChapterKnowledge
 from app.models.timetable_entry import TimetableEntry
 from app.models.learning_plan import LearningPlan
+from app.models.auth_token import AuthToken
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
     "Teacher", "Student", "Recording", "RecordingStatus", "LLMReport",
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
-    "TimetableEntry", "LearningPlan",
+    "TimetableEntry", "LearningPlan", "AuthToken",
 ]

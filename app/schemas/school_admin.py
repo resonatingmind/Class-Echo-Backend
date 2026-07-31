@@ -17,6 +17,9 @@ class SchoolAdminProfileOut(BaseModel):
     school_logo_url: str | None
     school_address: str | None
     created_at: datetime
+    status: str = "active"
+    email_verified: bool = False
+    rejected_reason: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

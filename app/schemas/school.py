@@ -7,10 +7,25 @@ class SchoolCreate(BaseModel):
     name: str
     address: str | None = None
     logo_url: str | None = None
-    # School admin details (auto-created with school)
+    # School admin is created invited (no password) and accepts via emailed link.
+    admin_name: str
+    admin_email: EmailStr
+
+
+class SchoolRegisterRequest(BaseModel):
+    school_name: str
+    school_address: str | None = None
     admin_name: str
     admin_email: EmailStr
     admin_password: str
+
+
+class SchoolRejectRequest(BaseModel):
+    reason: str | None = None
+
+
+class SchoolDeleteRequest(BaseModel):
+    password: str
 
 
 class SchoolUpdate(BaseModel):
@@ -23,8 +38,8 @@ class SchoolAdminOut(BaseModel):
     id: int
     name: str
     email: str
-    status: str
-    email_verified: bool
+    status: str = "active"
+    email_verified: bool = False
     rejected_reason: str | None = None
 
     class Config:

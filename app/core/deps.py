@@ -107,3 +107,37 @@ async def get_student(current=Depends(get_current_user)):
     if role != "student":
         raise HTTPException(status_code=403, detail="Student access required")
     return user
+
+
+TEACHER_STATUS_DETAIL = {
+    "invited": "teacher_invited",
+    "pending_approval": "teacher_pending_approval",
+    "rejected": "teacher_rejected",
+    "suspended": "teacher_suspended",
+}
+
+
+async def get_active_teacher(teacher=Depends(get_teacher)):
+    """Gate for teacher business endpoints. `/teacher/me` uses get_teacher
+    directly so a pending/suspended teacher can still poll their own status."""
+    if teacher.status != "active":
+        detail = TEACHER_STATUS_DETAIL.get(teacher.status, "teacher_inactive")
+        raise HTTPException(status_code=403, detail=detail)
+    return teacher
+
+
+SCHOOL_ADMIN_STATUS_DETAIL = {
+    "invited": "school_admin_invited",
+    "pending_approval": "school_admin_pending_approval",
+    "rejected": "school_admin_rejected",
+    "suspended": "school_admin_suspended",
+}
+
+
+async def get_active_school_admin(school_admin=Depends(get_school_admin)):
+    """Gate for school-admin business endpoints. `/school/me` uses
+    get_school_admin directly so a pending school can still poll its status."""
+    if school_admin.status != "active":
+        detail = SCHOOL_ADMIN_STATUS_DETAIL.get(school_admin.status, "school_admin_inactive")
+        raise HTTPException(status_code=403, detail=detail)
+    return school_admin

@@ -28,14 +28,12 @@ class SchoolRegisterRequest(BaseModel):
     admin_email: EmailStr
     admin_password: str
 
+class AcceptInviteRequest(BaseModel):
+    token: str
+    password: str
 
 class TeacherRegisterRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
     school_id: int
-
-
-class AcceptInviteRequest(BaseModel):
-    token: str
-    password: str

@@ -9,6 +9,7 @@ from app.database import get_db
 from app.core.deps import get_teacher, get_active_teacher
 from app.models.subject import Subject
 from app.models.recording import Recording
+from app.models.llm_report import LLMReport
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
@@ -80,6 +81,9 @@ def _teacher_out(teacher) -> TeacherOut:
         email_verified=teacher.email_verified,
         rejected_reason=teacher.rejected_reason,
         created_at=teacher.created_at,
+        status=teacher.status,
+        email_verified=teacher.email_verified,
+        rejected_reason=teacher.rejected_reason,
     )
 
 
@@ -238,6 +242,13 @@ async def teacher_dashboard_summary(
 
         else:
             status = "Completed"
+
+        scores = [
+            float(r.report.overall_score)
+            for r in recordings
+            if not r.is_archived and r.report is not None and r.report.overall_score is not None
+        ]
+        average_score = round(sum(scores) / len(scores), 1) if scores else None
 
         dashboard.append(
             TeacherDashboardSubjectOut(
@@ -646,7 +657,7 @@ async def list_recordings(
     # result = await db.execute(
     #     select(Recording)
     #     .options(
-    #         selectinload(Recording.report),
+    #         selectinload(Recording.report).selectinload(LLMReport.recording),
     #         selectinload(Recording.chapter)
     #         .selectinload(Chapter.documents),
     #         selectinload(Recording.chapter)
@@ -662,8 +673,7 @@ async def list_recordings(
     
     query = ( select(Recording)
         .options(
-        selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+        selectinload(Recording.report).selectinload(LLMReport.recording),
         selectinload(Recording.chapter)
         .selectinload(Chapter.documents),
         selectinload(Recording.chapter)
@@ -750,8 +760,7 @@ async def upload_recording(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -771,8 +780,7 @@ async def retry_recording(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -796,8 +804,7 @@ async def retry_recording(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -817,8 +824,7 @@ async def get_report(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -844,8 +850,7 @@ async def update_recording(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -874,8 +879,7 @@ async def archive_recording(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report),
-        selectinload(Recording.learning_plan),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)

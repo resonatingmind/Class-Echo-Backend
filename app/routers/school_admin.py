@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.database import get_db
-from app.core.deps import get_school_admin
+from app.core.deps import get_school_admin, get_active_school_admin
 from app.models.class_ import Class
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
@@ -18,7 +18,12 @@ from app.schemas.class_ import ClassCreate, ClassUpdate, ClassOut
 from app.schemas.school import SchoolOut
 from app.schemas.school_admin import SchoolAdminProfileOut, SchoolAdminUpdate
 from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest, SubjectWithClassOut
-from app.schemas.teacher import TeacherCreate, TeacherOut, TeacherProfileOut, TeacherInvite, TeacherReject
+from app.schemas.teacher import (
+    TeacherOut,
+    TeacherProfileOut,
+    TeacherInviteRequest,
+    TeacherRejectRequest,
+)
 from app.schemas.recording import RecordingWithReport, LLMReportOut
 from app.schemas.student import StudentOut, StudentWithClassOut
 from app.schemas.chapter import ChapterCreate, ChapterUpdate, ChapterOut, ChapterDocumentOut, ChapterKnowledgeOut
@@ -30,7 +35,6 @@ from app.schemas.school_dashboard import (
 )
 from app.schemas.teacher_analytics import TeacherAnalyticsOut
 from app.schemas.teacher_recordings import TeacherRecordingOut
-from app.core.security import hash_password
 from app.services.s3_service import upload_image, upload_document
 from app.services import chapter_service
 from app.services.school_dashboard_service import (
@@ -67,6 +71,11 @@ from app.services.planner_assignment_service import (
     quick_assignment,
     replace_assignment,
 )
+from app.services import teacher_onboarding_service as onboarding
+from app.core.security import generate_token_pair
+from app.models.auth_token import AuthToken
+from app.tasks.email_tasks import send_email_task
+from app.config import settings
 
 from fastapi.responses import StreamingResponse
 from app.models.timetable_entry import TimetableEntry
@@ -123,7 +132,7 @@ async def update_my_profile(
 async def upload_profile_image(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await upload_image(file, folder=f"classecho/school-admins/{school_admin.id}")
     school_admin.profile_pic_url = result["url"]
@@ -136,7 +145,7 @@ async def upload_profile_image(
 async def upload_school_logo(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await upload_image(file, folder=f"classecho/schools/{school_admin.school_id}")
     school = await db.get(School, school_admin.school_id)
@@ -159,7 +168,7 @@ async def upload_school_logo(
 )
 async def dashboard_overview(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_school_dashboard_overview(
         db,
@@ -173,7 +182,7 @@ async def dashboard_overview(
 )
 async def dashboard_analytics(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_school_analytics(
         db,
@@ -187,7 +196,7 @@ async def dashboard_analytics(
 )
 async def dashboard_teacher_ranking(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_teacher_ranking(
         db,
@@ -201,7 +210,7 @@ async def dashboard_teacher_ranking(
 )
 async def dashboard_recent_activity(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_recent_activity(
         db,
@@ -212,44 +221,44 @@ async def dashboard_recent_activity(
 
 # ─── Teacher management ───────────────────────────────────────────────────────
 
+def _teacher_admin_out(t: Teacher) -> TeacherOut:
+    return TeacherOut(
+        id=t.id,
+        name=t.name,
+        email=t.email,
+        profile_image_url=t.profile_image_url,
+        school_id=t.school_id,
+        school_name=t.school.name if t.school else None,
+        created_at=t.created_at,
+        status=t.status,
+        email_verified=t.email_verified,
+        rejected_reason=t.rejected_reason,
+    )
+
+
 @router.get("/teachers", response_model=list[TeacherOut])
 async def list_teachers(
-    status: str | None = Query(None),
+    status: str | None = Query(None, description="Filter by invited/pending_approval/active/suspended/rejected"),
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     query = (
         select(Teacher)
         .options(selectinload(Teacher.school))
         .where(Teacher.school_id == school_admin.school_id)
     )
-    if status:
+    if status is not None:
         query = query.where(Teacher.status == status)
-    query = query.order_by(Teacher.name)
-    result = await db.execute(query)
+    result = await db.execute(query.order_by(Teacher.name))
     teachers = result.scalars().all()
-    return [
-        TeacherOut(
-            id=t.id,
-            name=t.name,
-            email=t.email,
-            profile_image_url=t.profile_image_url,
-            school_id=t.school_id,
-            school_name=t.school.name if t.school else None,
-            status=t.status,
-            email_verified=t.email_verified,
-            rejected_reason=t.rejected_reason,
-            created_at=t.created_at,
-        )
-        for t in teachers
-    ]
+    return [_teacher_admin_out(t) for t in teachers]
 
 
 @router.get("/teachers/lookup", response_model=TeacherLookupOut)
 async def lookup_teacher(
     email: str,
     db: AsyncSession = Depends(get_db),
-    school_admin: SchoolAdmin = Depends(get_school_admin),
+    school_admin: SchoolAdmin = Depends(get_active_school_admin),
 ):
     teacher = await db.scalar(
         select(Teacher).where(
@@ -270,47 +279,151 @@ async def lookup_teacher(
         exists=False,
     )
 
-@router.post("/teachers", response_model=TeacherOut, status_code=201)
-async def create_teacher(
-    body: TeacherCreate,
+@router.post("/teachers/invite", response_model=TeacherOut, status_code=201)
+async def invite_teacher(
+    body: TeacherInviteRequest,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
-    from app.models.admin import Admin
-    from app.models.school_admin import SchoolAdmin
-    from app.models.student import Student
-    for Model in (Admin, SchoolAdmin, Teacher, Student):
-        r = await db.execute(select(Model).where(Model.email == body.email))
-        if r.scalar_one_or_none():
-            raise HTTPException(status_code=409, detail="Email already registered")
-
-    teacher = Teacher(
-        name=body.name,
-        email=body.email,
-        hashed_password=hash_password(body.password),
-        profile_image_url=body.profile_image_url,
-        school_id=school_admin.school_id,
-        status="active",
+    action, existing = await onboarding.classify_teacher_signup(
+        db, body.email, school_admin.school_id
     )
-    db.add(teacher)
+
+    if action == onboarding.CONFLICT_TAKEN:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    if action == onboarding.CONFLICT_OTHER_SCHOOL:
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already associated with a different school",
+        )
+    if action == onboarding.EXISTING_PENDING_SAME_SCHOOL:
+        raise HTTPException(
+            status_code=409,
+            detail="This teacher already self-registered and is awaiting your approval",
+        )
+
+    if action == onboarding.EXISTING_INVITED_SAME_SCHOOL:
+        teacher = existing
+        teacher.name = body.name
+    else:
+        teacher = Teacher(
+            name=body.name,
+            email=body.email,
+            hashed_password=None,
+            school_id=school_admin.school_id,
+            status="invited",
+            invited_by_school_admin_id=school_admin.id,
+        )
+        db.add(teacher)
+
+    await db.flush()
+
+    raw_token, token_hash = generate_token_pair()
+    db.add(
+        AuthToken(
+            user_type="teacher",
+            user_id=teacher.id,
+            token_hash=token_hash,
+            purpose="invite",
+            expires_at=datetime.utcnow() + timedelta(days=7),
+        )
+    )
     await db.commit()
+    await db.refresh(teacher)
+
+    invite_link = f"{settings.FRONTEND_URL}/accept-invite?token={raw_token}"
+    send_email_task.delay(
+        teacher.email,
+        "You've been invited to Class Echo",
+        f"<p>Hi {teacher.name},</p><p>You've been invited to join Class Echo as a "
+        f"teacher. Set your password to get started: "
+        f"<a href='{invite_link}'>{invite_link}</a></p>",
+    )
 
     result = await db.execute(
         select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher.id)
     )
-    t = result.scalar_one()
-    return TeacherOut(
-        id=t.id,
-        name=t.name,
-        email=t.email,
-        profile_image_url=t.profile_image_url,
-        school_id=t.school_id,
-        school_name=t.school.name if t.school else None,
-        status=t.status,
-        email_verified=t.email_verified,
-        rejected_reason=t.rejected_reason,
-        created_at=t.created_at,
+    return _teacher_admin_out(result.scalar_one())
+
+
+@router.post("/teachers/{teacher_id}/approve", response_model=TeacherOut)
+async def approve_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    teacher = await _get_owned_teacher(teacher_id, school_admin.school_id, db)
+    if teacher.status != "pending_approval":
+        raise HTTPException(status_code=400, detail="Only pending teachers can be approved")
+
+    teacher.status = "active"
+    teacher.approved_at = datetime.utcnow()
+    teacher.approved_by_school_admin_id = school_admin.id
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_admin_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/reject", response_model=TeacherOut)
+async def reject_teacher(
+    teacher_id: int,
+    body: TeacherRejectRequest,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    teacher = await _get_owned_teacher(teacher_id, school_admin.school_id, db)
+    if teacher.status != "pending_approval":
+        raise HTTPException(status_code=400, detail="Only pending teachers can be rejected")
+
+    teacher.status = "rejected"
+    teacher.rejected_reason = body.reason
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_admin_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/suspend", response_model=TeacherOut)
+async def suspend_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    teacher = await _get_owned_teacher(teacher_id, school_admin.school_id, db)
+    if teacher.status != "active":
+        raise HTTPException(status_code=400, detail="Only active teachers can be suspended")
+
+    teacher.status = "suspended"
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_admin_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/reactivate", response_model=TeacherOut)
+async def reactivate_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    teacher = await _get_owned_teacher(teacher_id, school_admin.school_id, db)
+    if teacher.status != "suspended":
+        raise HTTPException(status_code=400, detail="Only suspended teachers can be reactivated")
+
+    teacher.status = "active"
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_admin_out(teacher)
+
+
+async def _get_owned_teacher(teacher_id: int, school_id: int, db: AsyncSession) -> Teacher:
+    result = await db.execute(
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.id == teacher_id, Teacher.school_id == school_id)
     )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    return teacher
 
 
 @router.post("/teachers/invite", response_model=TeacherOut)
@@ -487,7 +600,7 @@ async def reactivate_teacher(
 async def get_teacher_subjects(
     teacher_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await db.execute(
         select(Subject)
@@ -512,7 +625,7 @@ async def get_teacher_subjects(
 async def teacher_profile(
     teacher_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await db.execute(
         select(Teacher).where(
@@ -548,7 +661,7 @@ async def teacher_analytics(
     end_date: datetime | None = Query(None),
     search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify teacher belongs to this school
     result = await db.execute(
@@ -583,7 +696,7 @@ async def teacher_analytics(
 async def teacher_analytics_filters(
     teacher_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_teacher_analytics_filters(
         db=db,
@@ -597,7 +710,7 @@ async def teacher_analytics_filters(
 async def teacher_recordings(
     teacher_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify teacher belongs to this school
     result = await db.execute(
@@ -627,7 +740,7 @@ async def teacher_recordings(
 async def chapter_recordings(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await get_chapter_recordings(
         db=db,
@@ -641,7 +754,7 @@ async def chapter_recordings(
 async def school_recording_detail(
     recording_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     recording = await get_recording_detail(
         db,
@@ -670,7 +783,7 @@ async def school_recording_detail(
 @router.get("/classes", response_model=list[ClassOut])
 async def list_classes(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await db.execute(
         select(Class).where(Class.school_id == school_admin.school_id).order_by(
@@ -686,7 +799,7 @@ async def lookup_class(
     name: str,
     section: str,
     db: AsyncSession = Depends(get_db),
-    school_admin: SchoolAdmin = Depends(get_school_admin),
+    school_admin: SchoolAdmin = Depends(get_active_school_admin),
 ):
     class_ = await db.scalar(
         select(Class).where(
@@ -714,7 +827,7 @@ async def lookup_class(
 async def create_class(
     body: ClassCreate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     
     existing = await db.scalar(
@@ -747,7 +860,7 @@ async def create_class(
 async def get_class(
     class_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     class_ = await _get_owned_class(class_id, school_admin.school_id, db)
     return class_
@@ -758,7 +871,7 @@ async def update_class(
     class_id: int,
     body: ClassUpdate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     class_ = await _get_owned_class(class_id, school_admin.school_id, db)
     for field, value in body.model_dump(exclude_none=True).items():
@@ -772,7 +885,7 @@ async def update_class(
 async def delete_class(
     class_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     class_ = await _get_owned_class(class_id, school_admin.school_id, db)
     await db.delete(class_)
@@ -789,7 +902,7 @@ async def delete_class(
 async def create_quick_assignment(
     body: QuickAssignmentIn,
     db: AsyncSession = Depends(get_db),
-    school_admin: SchoolAdmin = Depends(get_school_admin),
+    school_admin: SchoolAdmin = Depends(get_active_school_admin),
 ):
     return await quick_assignment(
         db=db,
@@ -805,7 +918,7 @@ async def create_quick_assignment(
 async def replace_teacher_assignment(
     body: ReplaceAssignmentIn,
     db: AsyncSession = Depends(get_db),
-    school_admin: SchoolAdmin = Depends(get_school_admin),
+    school_admin: SchoolAdmin = Depends(get_active_school_admin),
 ):
     return await replace_assignment(
         db=db,
@@ -820,7 +933,7 @@ async def replace_teacher_assignment(
 async def list_subjects(
     class_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_class(class_id, school_admin.school_id, db)
     result = await db.execute(
@@ -837,7 +950,7 @@ async def create_subject(
     class_id: int,
     body: SubjectCreate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_class(class_id, school_admin.school_id, db)
     subject = Subject(
@@ -860,7 +973,7 @@ async def lookup_subject(
     class_id: int,
     name: str,
     db: AsyncSession = Depends(get_db),
-    school_admin: SchoolAdmin = Depends(get_school_admin),
+    school_admin: SchoolAdmin = Depends(get_active_school_admin),
 ):
     
     class_ = await db.scalar(
@@ -903,7 +1016,7 @@ async def update_subject(
     subject_id: int,
     body: SubjectUpdate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
     for field, value in body.model_dump(exclude_none=True).items():
@@ -921,7 +1034,7 @@ async def assign_teacher(
     subject_id: int,
     body: AssignTeacherRequest,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
 
@@ -953,7 +1066,7 @@ async def assign_teacher(
 @router.get("/students", response_model=list[StudentWithClassOut])
 async def list_students(
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     result = await db.execute(
         select(Student)
@@ -981,7 +1094,7 @@ async def list_students(
 async def list_subject_students(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
     result = await db.execute(
@@ -998,12 +1111,12 @@ async def list_subject_students(
 async def list_subject_recordings(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_subject(subject_id, school_admin.school_id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(selectinload(Recording.report).selectinload(LLMReport.recording))
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )
@@ -1014,7 +1127,7 @@ async def list_subject_recordings(
 async def list_subject_reports(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_subject(subject_id, school_admin.school_id, db)
     result = await db.execute(
@@ -1033,7 +1146,7 @@ async def create_chapter(
     subject_id: int,
     body: ChapterCreate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await chapter_service.create_chapter(db, subject_id, school_admin.school_id, body)
 
@@ -1042,7 +1155,7 @@ async def create_chapter(
 async def list_chapters(
     subject_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await chapter_service.list_chapters(db, subject_id, school_admin.school_id)
 
@@ -1051,7 +1164,7 @@ async def list_chapters(
 async def get_chapter(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await chapter_service.get_chapter_details(db, chapter_id, school_admin.school_id)
 
@@ -1061,7 +1174,7 @@ async def update_chapter(
     chapter_id: int,
     body: ChapterUpdate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     return await chapter_service.update_chapter(db, chapter_id, school_admin.school_id, body)
 
@@ -1070,7 +1183,7 @@ async def update_chapter(
 async def delete_chapter(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await chapter_service.delete_chapter(db, chapter_id, school_admin.school_id)
 
@@ -1080,7 +1193,7 @@ async def upload_chapter_document(
     chapter_id: int,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify the chapter exists and is owned by the school admin's school
     await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
@@ -1111,7 +1224,7 @@ async def upload_chapter_document(
 async def list_chapter_documents(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify ownership of the chapter
     await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
@@ -1128,7 +1241,7 @@ async def list_chapter_documents(
 async def delete_chapter_document(
     document_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Retrieve the document with ownership validation
     result = await db.execute(
@@ -1150,7 +1263,7 @@ async def delete_chapter_document(
 async def get_chapter_knowledge(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify ownership
     await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
@@ -1169,7 +1282,7 @@ async def get_chapter_knowledge(
 async def regenerate_chapter_knowledge(
     chapter_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     # Verify ownership
     await chapter_service.get_owned_chapter(db, chapter_id, school_admin.school_id)
@@ -1191,7 +1304,7 @@ async def list_timetable(
     day_of_week: str | None = None,
     academic_year: str | None = None,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     query = (
         select(TimetableEntry)
@@ -1234,7 +1347,7 @@ async def import_timetable(
     file: UploadFile = File(...),
     replace_existing: bool = False,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     content = await file.read()
     if not content:
@@ -1298,7 +1411,7 @@ async def _check_timetable_clashes(
 async def create_timetable_entry(
     body: TimetableEntryCreate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_class(body.class_id, school_admin.school_id, db)
     await _get_owned_subject(body.subject_id, school_admin.school_id, db)
@@ -1340,7 +1453,7 @@ async def update_timetable_entry(
     entry_id: int,
     body: TimetableEntryUpdate,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     entry = await _get_owned_timetable_entry(entry_id, school_admin.school_id, db)
 
@@ -1393,7 +1506,7 @@ async def update_timetable_entry(
 async def delete_timetable_entry(
     entry_id: int,
     db: AsyncSession = Depends(get_db),
-    school_admin=Depends(get_school_admin),
+    school_admin=Depends(get_active_school_admin),
 ):
     entry = await _get_owned_timetable_entry(entry_id, school_admin.school_id, db)
     await db.delete(entry)
@@ -1459,4 +1572,5 @@ def _build_school_admin_profile(admin: SchoolAdmin) -> SchoolAdminProfileOut:
         school_logo_url=school.logo_url,
         school_address=school.address,
         created_at=admin.created_at,
+
     )
