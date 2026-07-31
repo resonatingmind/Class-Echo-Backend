@@ -20,18 +20,25 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column(
-        "school_admins",
-        sa.Column("status", sa.String(length=50), nullable=False, server_default="active"),
-    )
-    op.add_column(
-        "school_admins",
-        sa.Column("email_verified", sa.Boolean(), nullable=False, server_default="true"),
-    )
-    op.add_column(
-        "school_admins",
-        sa.Column("rejected_reason", sa.String(length=500), nullable=True),
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    cols = [c['name'] for c in inspector.get_columns('school_admins')]
+    
+    if 'status' not in cols:
+        op.add_column(
+            "school_admins",
+            sa.Column("status", sa.String(length=50), nullable=False, server_default="active"),
+        )
+    if 'email_verified' not in cols:
+        op.add_column(
+            "school_admins",
+            sa.Column("email_verified", sa.Boolean(), nullable=False, server_default="true"),
+        )
+    if 'rejected_reason' not in cols:
+        op.add_column(
+            "school_admins",
+            sa.Column("rejected_reason", sa.String(length=500), nullable=True),
+        )
 
 
 def downgrade() -> None:
