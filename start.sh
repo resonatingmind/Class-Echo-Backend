@@ -27,19 +27,17 @@ else:
     sys.exit(1)
 PY
 
+# Wipe the database first if requested
+if [ "${RESET_DB_ON_DEPLOY:-false}" = "true" ]; then
+    echo "RESET_DB_ON_DEPLOY=true -- wiping database schema completely"
+    python reset_db.py --yes
+fi
+
 # Run database migrations
 alembic upgrade head
 
 # Seed the database.
-# Set RESET_DB_ON_DEPLOY=true to wipe all data and reseed only the admin
-# on every deploy. Defaults to off — the normal path just seeds the admin
-# if missing, leaving existing data untouched.
-if [ "${RESET_DB_ON_DEPLOY:-false}" = "true" ]; then
-    echo "RESET_DB_ON_DEPLOY=true -- wiping all data and reseeding admin"
-    python reset_db.py --yes
-else
-    python seed_admin.py
-fi
+python seed_admin.py
 
 # Start celery worker in the background
 celery -A celery_worker.celery_app worker --loglevel=info --concurrency=1 &

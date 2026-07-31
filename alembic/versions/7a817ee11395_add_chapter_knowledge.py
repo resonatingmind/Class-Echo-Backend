@@ -19,19 +19,24 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        'chapter_knowledge',
-        sa.Column('chapter_id', sa.Integer(), nullable=False),
-        sa.Column('chapter_summary', sa.Text(), nullable=False),
-        sa.Column('learning_objectives', sa.JSON(), nullable=False),
-        sa.Column('key_concepts', sa.JSON(), nullable=False),
-        sa.Column('must_cover_topics', sa.JSON(), nullable=False),
-        sa.Column('common_misconceptions', sa.JSON(), nullable=False),
-        sa.Column('generated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.ForeignKeyConstraint(['chapter_id'], ['chapters.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('chapter_id')
-    )
-    op.create_index(op.f('ix_chapter_knowledge_chapter_id'), 'chapter_knowledge', ['chapter_id'], unique=False)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = inspector.get_table_names()
+
+    if 'chapter_knowledge' not in existing_tables:
+        op.create_table(
+            'chapter_knowledge',
+            sa.Column('chapter_id', sa.Integer(), nullable=False),
+            sa.Column('chapter_summary', sa.Text(), nullable=False),
+            sa.Column('learning_objectives', sa.JSON(), nullable=False),
+            sa.Column('key_concepts', sa.JSON(), nullable=False),
+            sa.Column('must_cover_topics', sa.JSON(), nullable=False),
+            sa.Column('common_misconceptions', sa.JSON(), nullable=False),
+            sa.Column('generated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+            sa.ForeignKeyConstraint(['chapter_id'], ['chapters.id'], ondelete='CASCADE'),
+            sa.PrimaryKeyConstraint('chapter_id')
+        )
+        op.create_index(op.f('ix_chapter_knowledge_chapter_id'), 'chapter_knowledge', ['chapter_id'], unique=False)
 
 
 def downgrade() -> None:

@@ -54,48 +54,37 @@ TRUNCATE_ORDER = [
 
 
 async def truncate_all_tables():
-    """Truncate every table using CASCADE to handle FK constraints.
+    """Wipe the database schema completely to allow a fresh migration.
     
-    Uses a single TRUNCATE statement with all tables and CASCADE — this works
-    on Render's managed Postgres where session_replication_role is restricted.
+    This reflects all tables (including alembic_version) and drops them.
     """
-    # Build a comma-separated list of quoted table names
-    tables_sql = ", ".join(f'"{t}"' for t in TRUNCATE_ORDER)
     async with engine.begin() as conn:
         try:
-            await conn.execute(
-                text(f"TRUNCATE TABLE {tables_sql} RESTART IDENTITY CASCADE;")
-            )
-            for table in TRUNCATE_ORDER:
-                print(f"  [OK] Truncated: {table}")
+            # The cleanest way to wipe a Postgres database is to drop and recreate the public schema.
+            # This wipes all tables, types (like vector), and alembic tracking data.
+            await conn.execute(text("DROP SCHEMA public CASCADE;"))
+            await conn.execute(text("CREATE SCHEMA public;"))
+            await conn.execute(text("GRANT ALL ON SCHEMA public TO public;"))
+            print("  [OK] Dropped and recreated 'public' schema.")
         except Exception as e:
-            # Some tables might not exist yet — fall back
-            # to truncating one by one and skip missing ones
-            print(f"  [!]  Bulk truncate failed, trying one by one ...")
-            for table in TRUNCATE_ORDER:
-                try:
-                    await conn.execute(
-                        text(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE;')
-                    )
-                    print(f"  [OK] Truncated: {table}")
-                except Exception as inner_e:
-                    print(f"  [--] Skipped '{table}': {inner_e}")
+            print(f"  [!] Failed to drop schema public (possibly due to permissions): {e}")
+            print("  [wait] Attempting to drop tables individually via reflection...")
+            
+            # Fallback: drop all tables individually using a synchronous connection
+            def drop_everything(connection):
+                from sqlalchemy import inspect, MetaData
+                inspector = inspect(connection)
+                meta = MetaData()
+                meta.reflect(bind=connection)
+                meta.drop_all(bind=connection)
+                
+                # Also drop alembic_version if it wasn't in meta
+                if inspector.has_table("alembic_version"):
+                    connection.execute(text("DROP TABLE alembic_version;"))
+                    
+            await conn.run_sync(drop_everything)
+            print("  [OK] Dropped all tables individually.")
     print()
-
-
-async def seed_admin(name: str, email: str, password: str):
-    """Insert the new Super Admin."""
-    async with AsyncSessionLocal() as session:
-        admin = Admin(
-            name=name,
-            email=email.strip().lower(),
-            hashed_password=hash_password(password),
-        )
-        session.add(admin)
-        await session.commit()
-        await session.refresh(admin)
-    print(f"  [OK] Admin created: {admin.name} <{admin.email}> (id={admin.id})")
-    print("    -> Log in via POST /auth/login")
 
 
 async def main(name: str, email: str, password: str):
@@ -106,9 +95,6 @@ async def main(name: str, email: str, password: str):
 
     print("Step 1: Truncating all tables ...")
     await truncate_all_tables()
-
-    print("Step 2: Seeding new Super Admin ...")
-    await seed_admin(name, email, password)
 
     print()
     print("=" * 60)
