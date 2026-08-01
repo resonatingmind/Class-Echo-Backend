@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -93,3 +93,31 @@ async def delete_school_learning_plan(
 ):
     await learning_plan_service.delete_learning_plan(db, plan_id)
     return None
+
+
+@router.post("/teacher/subjects/{subject_id}/learning-plans/import", response_model=list[LearningPlanOut])
+async def import_teacher_subject_learning_plans(
+    subject_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    await chapter_service.get_teacher_owned_subject(db, subject_id, teacher.id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    return await learning_plan_service.import_subject_learning_plans_from_excel(db, subject_id, content)
+
+
+@router.post("/school/subjects/{subject_id}/learning-plans/import", response_model=list[LearningPlanOut])
+async def import_school_subject_learning_plans(
+    subject_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    await chapter_service.get_owned_subject(db, subject_id, school_admin.school_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    return await learning_plan_service.import_subject_learning_plans_from_excel(db, subject_id, content)

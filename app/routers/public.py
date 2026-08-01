@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -39,3 +40,15 @@ async def public_list_classes(
 )
     )
     return result.scalars().all()
+
+
+@router.get("/learning-plans/subject-template")
+async def download_subject_learning_plan_template():
+    """Download a blank Excel template for subject-level learning plans."""
+    from app.services.learning_plan_service import build_subject_learning_plan_template_workbook
+    buffer = build_subject_learning_plan_template_workbook()
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=subject_planner_template.xlsx"},
+    )

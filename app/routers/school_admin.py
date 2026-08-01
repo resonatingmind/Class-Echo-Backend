@@ -871,14 +871,18 @@ async def assign_teacher(
 ):
     subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
 
-    teacher = await db.get(Teacher, body.teacher_id)
-    if not teacher or teacher.school_id != school_admin.school_id:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    if body.teacher_id is not None:
+        teacher = await db.get(Teacher, body.teacher_id)
+        if not teacher or teacher.school_id != school_admin.school_id:
+            raise HTTPException(status_code=404, detail="Teacher not found")
 
-    # Update assignment only if teacher changed
-    if subject.teacher_id != body.teacher_id:
-        subject.teacher_id = body.teacher_id
-        subject.teacher_assigned_at = datetime.utcnow()
+        # Update assignment only if teacher changed
+        if subject.teacher_id != body.teacher_id:
+            subject.teacher_id = body.teacher_id
+            subject.teacher_assigned_at = datetime.utcnow()
+    else:
+        subject.teacher_id = None
+        subject.teacher_assigned_at = None
 
     await db.commit()
     await db.refresh(subject)
@@ -893,6 +897,19 @@ async def assign_teacher(
     )
 
     return result.scalar_one()
+
+
+@router.delete("/subjects/{subject_id}", status_code=204)
+async def delete_subject(
+    subject_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    subject = await _get_owned_subject(subject_id, school_admin.school_id, db)
+    await db.delete(subject)
+    await db.commit()
+    return None
+
 
 # ─── Students ────────────────────────────────────────────────────────────────
 

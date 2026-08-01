@@ -13,7 +13,7 @@ class SubjectUpdate(BaseModel):
 
 
 class AssignTeacherRequest(BaseModel):
-    teacher_id: int
+    teacher_id: int | None = None
 
 
 class TeacherBrief(BaseModel):
