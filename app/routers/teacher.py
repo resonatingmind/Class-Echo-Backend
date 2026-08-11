@@ -8,7 +8,7 @@ from app.models.chapter import Chapter
 from app.database import get_db
 from app.core.deps import get_teacher, get_active_teacher
 from app.models.subject import Subject
-from app.models.recording import Recording
+from app.models.recording import Recording, RecordingStatus
 from app.models.llm_report import LLMReport
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
@@ -323,7 +323,9 @@ async def list_subject_chapters(
     chapters = list(result.scalars().all())
 
     rec_result = await db.execute(
-        select(Recording).where(
+        select(Recording)
+        .options(selectinload(Recording.report))
+        .where(
             Recording.subject_id == subject_id,
             Recording.is_archived == False,
         )
@@ -357,8 +359,15 @@ async def list_subject_chapters(
         else:
             status = "Completed"
 
+        scores = [
+            r.report.overall_score
+            for r in recs
+            if r.report is not None and r.report.overall_score is not None
+        ]
+
         c_out = ChapterOut.model_validate(c)
         c_out.ai_status = status
+        c_out.average_score = round(sum(scores) / len(scores), 1) if scores else None
         out.append(c_out)
 
     return out
@@ -661,6 +670,7 @@ async def list_recordings(
     query = ( select(Recording)
         .options(
         selectinload(Recording.report).selectinload(LLMReport.recording),
+        selectinload(Recording.learning_plan),
         selectinload(Recording.chapter)
         .selectinload(Chapter.documents),
         selectinload(Recording.chapter)
@@ -748,6 +758,7 @@ async def upload_recording(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -768,6 +779,7 @@ async def retry_recording(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -778,8 +790,12 @@ async def retry_recording(
     recording = result.scalar_one_or_none()
     if not recording:
         raise HTTPException(status_code=404, detail="Recording not found")
-    if recording.status != "failed":
-        raise HTTPException(status_code=400, detail="Only failed recordings can be retried")
+    # Anything that isn't finished can be re-queued: a worker restart leaves
+    # recordings stranded in pending/processing with no way to recover them.
+    if recording.status == RecordingStatus.completed:
+        raise HTTPException(
+            status_code=400, detail="This recording has already been analysed"
+        )
 
     recording.status = "pending"
     recording.processed_at = None
@@ -792,6 +808,7 @@ async def retry_recording(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -812,6 +829,7 @@ async def get_report(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -838,6 +856,7 @@ async def update_recording(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)
@@ -867,6 +886,7 @@ async def archive_recording(
         select(Recording)
         .options(
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
             selectinload(Recording.chapter)

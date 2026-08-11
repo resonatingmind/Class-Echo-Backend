@@ -1,6 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, model_validator
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm.attributes import set_committed_value
 from app.models.recording import RecordingStatus
 from app.services.s3_service import sign_url
 from app.schemas.learning_plan import LearningPlanOut
@@ -40,6 +41,26 @@ class RecordingOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _no_lazy_relationship_loads(cls, data, handler):
+        """Pydantic reads every declared field off the ORM object. Reading a
+        relationship that wasn't eager-loaded triggers a lazy load, which raises
+        MissingGreenlet under the async engine and turns the whole response into
+        a 500 (that is what happened to recordings bound to a learning plan).
+        Pin unloaded relationships to None first — without marking the instance
+        dirty — so serialization can never emit SQL."""
+        if not isinstance(data, dict):
+            try:
+                state = sa_inspect(data)
+            except Exception:
+                state = None
+            if state is not None:
+                for name in ("learning_plan", "report"):
+                    if name in state.unloaded:
+                        set_committed_value(data, name, None)
+        return handler(data)
 
     @model_validator(mode="after")
     def sign_s3_url(self) -> "RecordingOut":

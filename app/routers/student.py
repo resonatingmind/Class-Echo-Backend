@@ -124,7 +124,10 @@ async def list_recordings(
 
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.learning_plan),
+        )
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )

@@ -21,6 +21,7 @@ class ChapterOut(BaseModel):
     updated_at: datetime
     document_count: int = 0
     ai_status: str | None = None
+    average_score: float | None = None
 
     class Config:
         from_attributes = True
