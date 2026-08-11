@@ -9,7 +9,12 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
-    worker_concurrency=2,
+    # Recording analysis is minutes of mostly network wait, so a low concurrency
+    # made concurrent uploads queue behind each other and look stuck.
+    worker_concurrency=6,
+    # Long tasks + default prefetching means one busy worker hoards queued jobs
+    # while another sits idle.
+    worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
     task_serializer="json",
     result_serializer="json",

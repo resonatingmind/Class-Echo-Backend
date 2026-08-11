@@ -2,7 +2,12 @@
 #  config.py  –  weights, thresholds, constants
 # ─────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-2.5-flash"
+import os
+
+# gemini-2.5-flash is no longer served to newer API keys (404 NOT_FOUND), and
+# the old gemini-1.5-flash fallback is long retired. Overridable by env so a
+# future retirement doesn't need a code change.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 # ── Scoring rubric weights (must sum to 100) ──
 SCORE_WEIGHTS: dict[str, int] = {

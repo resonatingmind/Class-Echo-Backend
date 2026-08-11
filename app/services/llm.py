@@ -20,10 +20,20 @@ def _download_audio(url: str) -> str:
     return tmp_path
 
 
-def analyze_recording(cloudinary_url: str, reference_context: dict | None = None) -> dict:
+def analyze_recording(
+    cloudinary_url: str,
+    reference_context: dict | None = None,
+    audio_path: str | None = None,
+) -> dict:
     """
-    Download a lecture recording from Cloudinary, evaluate with Gemini audio,
-    and return results shaped for LLMReport storage.
+    Evaluate a lecture recording with Gemini audio and return results shaped for
+    LLMReport storage.
+
+    Pass ``audio_path`` when the caller has already downloaded the file — the
+    download is the second-largest cost in the pipeline and doing it twice for
+    the same recording is pure waste. When given, the caller owns the file and
+    is responsible for deleting it; otherwise the file is fetched from
+    ``cloudinary_url`` and cleaned up here.
 
     Returns
     -------
@@ -35,11 +45,16 @@ def analyze_recording(cloudinary_url: str, reference_context: dict | None = None
         "raw_llm_response":       dict,
     }
     """
-    tmp_path = _download_audio(cloudinary_url)
+    # The evaluation call is text-only. If a transcript is already available
+    # there is no reason to fetch the audio at all.
+    needs_audio = not (reference_context or {}).get("transcript")
+
+    owns_file = audio_path is None and needs_audio
+    tmp_path = audio_path or (_download_audio(cloudinary_url) if needs_audio else None)
     try:
         result = run_pipeline(tmp_path, reference_context=reference_context)
     finally:
-        if os.path.exists(tmp_path):
+        if owns_file and tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
     return {

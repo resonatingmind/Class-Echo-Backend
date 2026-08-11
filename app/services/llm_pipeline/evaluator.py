@@ -13,7 +13,15 @@ from google.genai import types
 from .config import EVALUATION_PROMPT_TEMPLATE, GEMINI_MODEL, SCORE_WEIGHTS
 
 logger = logging.getLogger(__name__)
-FALLBACK_MODEL = "gemini-1.5-flash"
+FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
+
+# Per-request timeouts (milliseconds). Without these a slow Gemini response
+# hangs the worker indefinitely instead of failing fast into a retry.
+TRANSCRIBE_TIMEOUT_MS = 15 * 60 * 1000
+EVALUATE_TIMEOUT_MS = 10 * 60 * 1000
+
+# Files API processing deadline for a single upload (seconds).
+FILE_ACTIVE_TIMEOUT_S = 300
 
 _client: genai.Client | None = None
 
@@ -54,16 +62,23 @@ def _upload_and_wait(client: genai.Client, audio_path: str):
         file=audio_path,
         config={"mime_type": mime, "display_name": "lecture_audio"},
     )
-    # Poll until ACTIVE or FAILED (usually a few seconds)
-    for _ in range(30):
+    # Poll until ACTIVE or FAILED. Short files are usually ready almost
+    # immediately, so start with a small sleep and back off — a flat 2s poll
+    # wasted up to two seconds on every recording. Long lectures need far more
+    # headroom than the old 60s ceiling allowed.
+    deadline = time.monotonic() + FILE_ACTIVE_TIMEOUT_S
+    delay = 0.5
+    while True:
         f = client.files.get(name=uploaded.name)
         state = f.state.name if hasattr(f.state, "name") else str(f.state)
-        if state in ("ACTIVE", "FAILED"):
-            if state == "FAILED":
-                raise RuntimeError("Gemini Files API failed to process the audio file.")
+        if state == "FAILED":
+            raise RuntimeError("Gemini Files API failed to process the audio file.")
+        if state == "ACTIVE":
             return f
-        time.sleep(2)
-    raise RuntimeError("Timed out waiting for Gemini Files API to process audio.")
+        if time.monotonic() + delay > deadline:
+            raise RuntimeError("Timed out waiting for Gemini Files API to process audio.")
+        time.sleep(delay)
+        delay = min(delay * 1.5, 5.0)
 
 
 def _call_gemini(client: genai.Client, reference_context: dict | None = None) -> str:
@@ -131,12 +146,21 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
+                config=types.GenerateContentConfig(
+                    http_options=types.HttpOptions(timeout=EVALUATE_TIMEOUT_MS),
+                ),
             )
             return response.text
         except genai_errors.ServerError:
             if model == FALLBACK_MODEL:
                 raise
             logger.warning("Model %s unavailable (503), falling back to %s", model, FALLBACK_MODEL)
+        except genai_errors.ClientError as exc:
+            # A retired or ungated model answers 404, not 503 — without this the
+            # fallback never engaged and every recording failed outright.
+            if model == FALLBACK_MODEL or "404" not in str(exc):
+                raise
+            logger.warning("Model %s not available (404), falling back to %s", model, FALLBACK_MODEL)
 
 
 def _parse_response(raw: str) -> dict:
@@ -221,6 +245,7 @@ def transcribe_audio(audio_path: str) -> str:
             "Do not summarize or omit anything. Capture all content accurately, including any code-switching "
             "between Hindi and English (Hinglish) or other Indian regional languages."
         )
+        started = time.monotonic()
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
@@ -230,7 +255,16 @@ def transcribe_audio(audio_path: str) -> str:
                 ),
                 prompt,
             ],
+            config=types.GenerateContentConfig(
+                # Verbatim transcription gains nothing from reasoning tokens,
+                # and flash models think by default — this is the single
+                # largest chunk of processing latency. Gemini 3.x rejects
+                # thinking_budget outright, so use thinking_level.
+                thinking_config=types.ThinkingConfig(thinking_level="low"),
+                http_options=types.HttpOptions(timeout=TRANSCRIBE_TIMEOUT_MS),
+            ),
         )
+        logger.info("Transcription completed in %.1fs", time.monotonic() - started)
         return response.text or ""
     finally:
         if file_ref is not None:
@@ -240,7 +274,7 @@ def transcribe_audio(audio_path: str) -> str:
                 pass
 
 
-def evaluate(audio_path: str, reference_context: dict | None = None) -> dict:
+def evaluate(audio_path: str | None, reference_context: dict | None = None) -> dict:
     """
     Evaluate the lecture transcript and reference context using Gemini.
     """
@@ -249,6 +283,10 @@ def evaluate(audio_path: str, reference_context: dict | None = None) -> dict:
         reference_context = {}
 
     if not reference_context.get("transcript"):
+        if not audio_path:
+            raise FileNotFoundError(
+                "No transcript in reference_context and no audio file to transcribe."
+            )
         logger.info("Transcript not found in reference_context. Transcribing audio first...")
         reference_context["transcript"] = transcribe_audio(audio_path)
 

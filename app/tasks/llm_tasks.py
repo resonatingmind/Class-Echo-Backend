@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from celery_worker import celery_app
 from app.services.llm import analyze_recording
@@ -6,7 +7,7 @@ from app.services.llm import analyze_recording
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, max_retries=5)
+@celery_app.task(bind=True, max_retries=2)
 def process_recording(self, recording_id: int, cloudinary_url: str):
     """
     Celery task: analyse a recording with the LLM stub and save the report.
@@ -20,6 +21,10 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
     db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
+
+    # Downloaded once and reused for both transcription and evaluation; removed
+    # in the finally block below.
+    tmp_audio: str | None = None
 
     try:
         with Session() as session:
@@ -47,13 +52,9 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 if not recording.transcription:
                     logger.info(f"Recording {recording_id} is missing transcription. Transcribing audio now...")
                     tmp_audio = _download_audio(fresh_url)
-                    try:
-                        transcript = transcribe_audio(tmp_audio)
-                        recording.transcription = transcript
-                        session.commit()
-                    finally:
-                        if os.path.exists(tmp_audio):
-                            os.remove(tmp_audio)
+                    transcript = transcribe_audio(tmp_audio)
+                    recording.transcription = transcript
+                    session.commit()
 
                 # Retrieve chapter context
                 if recording.transcription:
@@ -120,7 +121,11 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                             for p in plans
                         ]
 
-            report_data = analyze_recording(fresh_url, reference_context=reference_context)
+            report_data = analyze_recording(
+                fresh_url,
+                reference_context=reference_context,
+                audio_path=tmp_audio,
+            )
 
             report = LLMReport(
                 recording_id=recording_id,
@@ -140,7 +145,14 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
     except Exception as exc:
         # Build a user-friendly error reason from the exception
         error_reason = _classify_error(exc)
-        is_final_attempt = self.request.retries >= self.max_retries
+
+        # A per-day quota does not reset within any backoff we could sensibly
+        # wait out, so retrying only burns the next day's quota and leaves the
+        # recording sitting in `processing` for hours. Fail it immediately.
+        quota_scope = _quota_scope(exc)
+        is_final_attempt = (
+            quota_scope == "daily" or self.request.retries >= self.max_retries
+        )
 
         logger.error(
             "Recording %d analysis failed (attempt %d/%d): %s",
@@ -170,12 +182,61 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 exc_info=True,
             )
 
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        if quota_scope == "daily":
+            raise
+
+        # For a short-window (per-minute) quota the API tells us exactly how
+        # long to wait — honour that instead of guessing.
+        countdown = _retry_delay_seconds(exc) or 15 * (2 ** self.request.retries)
+        raise self.retry(exc=exc, countdown=countdown)
+
+    finally:
+        if tmp_audio and os.path.exists(tmp_audio):
+            try:
+                os.remove(tmp_audio)
+            except OSError:
+                logger.warning("Could not remove temp audio file %s", tmp_audio)
+
+
+def _quota_scope(exc: Exception) -> str | None:
+    """
+    Return "daily", "short" or None for a Gemini 429.
+
+    A 429 can mean either a per-minute burst limit (worth retrying in seconds)
+    or an exhausted per-day allowance (not worth retrying at all today). The
+    two are distinguished by the quotaId in the error payload.
+    """
+    msg = str(exc)
+    if "RESOURCE_EXHAUSTED" not in msg and "429" not in msg:
+        return None
+    if "PerDay" in msg or "free_tier_requests" in msg:
+        return "daily"
+    return "short"
+
+
+def _retry_delay_seconds(exc: Exception) -> float | None:
+    """Extract the server-supplied retryDelay (e.g. '50s') from a 429 payload."""
+    match = re.search(r"'retryDelay':\s*'(\d+(?:\.\d+)?)s'", str(exc))
+    if match:
+        # Small cushion so we don't come back a hair too early.
+        return float(match.group(1)) + 5
+    return None
 
 
 def _classify_error(exc: Exception) -> str:
     """Convert raw exceptions into user-friendly error descriptions."""
     msg = str(exc)
+
+    scope = _quota_scope(exc)
+    if scope == "daily":
+        return (
+            "The daily AI usage quota for this project has been exhausted, so "
+            "no further recordings can be analysed today. The quota resets at "
+            "midnight Pacific time, or an administrator can raise it by "
+            "enabling billing on the Gemini API key."
+        )
+    if scope == "short":
+        return "The AI service is rate-limited right now. This will retry automatically in a moment."
 
     if isinstance(exc, FileNotFoundError):
         return "The audio file could not be found or downloaded. It may have been deleted or the link expired."
