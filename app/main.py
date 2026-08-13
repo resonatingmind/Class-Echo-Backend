@@ -16,7 +16,26 @@ from app.routers import (
 
 
 
-app = FastAPI(title="ScholarMetric API", version="1.0.0")
+from contextlib import asynccontextmanager
+from sqlalchemy import text
+from app.database import engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Auto-migration: ensure status and rejected_reason columns exist
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active' NOT NULL;"))
+            await conn.execute(text("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS rejected_reason TEXT;"))
+            await conn.execute(text("ALTER TABLE school_admins ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active' NOT NULL;"))
+            await conn.execute(text("ALTER TABLE school_admins ADD COLUMN IF NOT EXISTS rejected_reason TEXT;"))
+    except Exception as e:
+        print(f"Startup migration warning: {e}")
+    yield
+
+
+app = FastAPI(title="ScholarMetric API", version="1.0.0", lifespan=lifespan)
 
 os.makedirs("uploads", exist_ok=True)
 

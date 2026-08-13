@@ -19,6 +19,8 @@ class TeacherOut(BaseModel):
     school_id: int | None
     school_name: str | None = None
     created_at: datetime
+    status: str = "active"
+    rejected_reason: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

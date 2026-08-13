@@ -19,10 +19,17 @@ class SchoolUpdate(BaseModel):
     logo_url: str | None = None
 
 
+class RejectRequest(BaseModel):
+    reason: str | None = None
+
+
 class SchoolAdminOut(BaseModel):
     id: int
     name: str
     email: str
+    status: str = "active"
+    email_verified: bool = True
+    rejected_reason: str | None = None
 
     class Config:
         from_attributes = True

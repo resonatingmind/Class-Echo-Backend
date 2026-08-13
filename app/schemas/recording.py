@@ -56,6 +56,26 @@ class LearningObjectiveStatus(BaseModel):
     status: str = "missing"   # "achieved" | "partial" | "missing"
 
 
+from sqlalchemy import inspect
+
+
+def _safe_get_loaded_attr(obj, attr_name, default=None):
+    """Safely get an attribute from an object or SQLAlchemy model only if it's already loaded in memory."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(attr_name, default)
+    try:
+        state = inspect(obj)
+        if state is not None and hasattr(state, "unloaded"):
+            if attr_name in state.unloaded:
+                return default
+        val = getattr(obj, attr_name, default)
+        return val if val is not None else default
+    except Exception:
+        return default
+
+
 class LLMReportOut(BaseModel):
     id: int
     recording_id: int
@@ -80,11 +100,7 @@ class LLMReportOut(BaseModel):
         instance = handler(data)
 
         # Try to get raw_llm_response from the ORM model
-        raw = None
-        if hasattr(data, "raw_llm_response"):
-            raw = data.raw_llm_response
-        elif isinstance(data, dict):
-            raw = data.get("raw_llm_response")
+        raw = _safe_get_loaded_attr(data, "raw_llm_response")
 
         if raw and isinstance(raw, dict):
             # Extract curriculum_coverage
@@ -105,21 +121,21 @@ class LLMReportOut(BaseModel):
                 )
 
         # Try to get chapter info from the related recording
-        recording = None
-        if hasattr(data, "recording"):
-            recording = data.recording
+        recording = _safe_get_loaded_attr(data, "recording")
 
         if recording:
-            chapter = getattr(recording, "chapter", None)
+            chapter = _safe_get_loaded_attr(recording, "chapter")
             if chapter:
-                doc_count = len(chapter.documents) if hasattr(chapter, "documents") else 0
-                knowledge = getattr(chapter, "knowledge", None)
+                documents = _safe_get_loaded_attr(chapter, "documents")
+                doc_count = len(documents) if documents is not None else 0
+                knowledge = _safe_get_loaded_attr(chapter, "knowledge")
                 learning_objs = []
                 if knowledge:
-                    learning_objs = knowledge.learning_objectives or []
+                    learning_objs = _safe_get_loaded_attr(knowledge, "learning_objectives", []) or []
 
+                chapter_name = getattr(chapter, "name", None)
                 instance.chapter_info = ChapterInfoOut(
-                    chapter_name=chapter.name,
+                    chapter_name=chapter_name,
                     document_count=doc_count,
                     learning_objectives=learning_objs,
                 )

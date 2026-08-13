@@ -13,7 +13,8 @@ from app.models.subject import Subject
 from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
-from app.schemas.school import SchoolCreate, SchoolUpdate, SchoolOut
+from app.models.chapter import Chapter
+from app.schemas.school import SchoolCreate, SchoolUpdate, SchoolOut, RejectRequest
 from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
 from app.schemas.student import StudentOut
@@ -80,6 +81,86 @@ async def get_school(
     school = result.scalar_one_or_none()
     if not school:
         raise HTTPException(status_code=404, detail="School not found")
+    return school
+
+
+@router.post("/schools/{school_id}/approve", response_model=SchoolOut)
+async def approve_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if school.admin:
+        school.admin.status = "active"
+        school.admin.rejected_reason = None
+        await db.commit()
+        await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/reject", response_model=SchoolOut)
+async def reject_school(
+    school_id: int,
+    body: RejectRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if school.admin:
+        school.admin.status = "rejected"
+        school.admin.rejected_reason = body.reason if body else None
+        await db.commit()
+        await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/suspend", response_model=SchoolOut)
+async def suspend_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if school.admin:
+        school.admin.status = "suspended"
+        await db.commit()
+        await db.refresh(school)
+    return school
+
+
+@router.post("/schools/{school_id}/reactivate", response_model=SchoolOut)
+async def reactivate_school(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    result = await db.execute(
+        select(School).options(selectinload(School.admin)).where(School.id == school_id)
+    )
+    school = result.scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found")
+    if school.admin:
+        school.admin.status = "active"
+        school.admin.rejected_reason = None
+        await db.commit()
+        await db.refresh(school)
     return school
 
 
@@ -212,7 +293,11 @@ async def list_school_subject_recordings(
     await _get_school_subject(subject_id, school_id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter).selectinload(Chapter.documents),
+            selectinload(Recording.chapter).selectinload(Chapter.knowledge),
+        )
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )

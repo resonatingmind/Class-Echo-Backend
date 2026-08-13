@@ -14,8 +14,9 @@ from app.models.teacher import Teacher
 from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
+from app.models.chapter import Chapter
 from app.schemas.class_ import ClassCreate, ClassUpdate, ClassOut
-from app.schemas.school import SchoolOut
+from app.schemas.school import SchoolOut, RejectRequest
 from app.schemas.school_admin import SchoolAdminProfileOut, SchoolAdminUpdate
 from app.schemas.subject import SubjectCreate, SubjectUpdate, SubjectOut, AssignTeacherRequest, SubjectWithClassOut
 from app.schemas.teacher import TeacherCreate, TeacherOut, TeacherProfileOut
@@ -209,6 +210,19 @@ async def dashboard_recent_activity(
     )
 
 
+def _teacher_out(t: Teacher) -> TeacherOut:
+    return TeacherOut(
+        id=t.id,
+        name=t.name,
+        email=t.email,
+        profile_image_url=t.profile_image_url,
+        school_id=t.school_id,
+        school_name=t.school.name if t.school else None,
+        created_at=t.created_at,
+        status=getattr(t, "status", "active") or "active",
+        rejected_reason=getattr(t, "rejected_reason", None),
+    )
+
 
 # ─── Teacher management ───────────────────────────────────────────────────────
 
@@ -224,18 +238,7 @@ async def list_teachers(
         .order_by(Teacher.name)
     )
     teachers = result.scalars().all()
-    return [
-        TeacherOut(
-            id=t.id,
-            name=t.name,
-            email=t.email,
-            profile_image_url=t.profile_image_url,
-            school_id=t.school_id,
-            school_name=t.school.name if t.school else None,
-            created_at=t.created_at,
-        )
-        for t in teachers
-    ]
+    return [_teacher_out(t) for t in teachers]
 
 
 @router.get("/teachers/lookup", response_model=TeacherLookupOut)
@@ -283,6 +286,7 @@ async def create_teacher(
         hashed_password=hash_password(body.password),
         profile_image_url=body.profile_image_url,
         school_id=school_admin.school_id,
+        status="active",
     )
     db.add(teacher)
     await db.commit()
@@ -291,15 +295,92 @@ async def create_teacher(
         select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher.id)
     )
     t = result.scalar_one()
-    return TeacherOut(
-        id=t.id,
-        name=t.name,
-        email=t.email,
-        profile_image_url=t.profile_image_url,
-        school_id=t.school_id,
-        school_name=t.school.name if t.school else None,
-        created_at=t.created_at,
+    return _teacher_out(t)
+
+
+@router.post("/teachers/{teacher_id}/approve", response_model=TeacherOut)
+async def approve_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
     )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher.status = "active"
+    teacher.rejected_reason = None
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/reject", response_model=TeacherOut)
+async def reject_teacher(
+    teacher_id: int,
+    body: RejectRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher.status = "rejected"
+    teacher.rejected_reason = body.reason if body else None
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/suspend", response_model=TeacherOut)
+async def suspend_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher.status = "suspended"
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_out(teacher)
+
+
+@router.post("/teachers/{teacher_id}/reactivate", response_model=TeacherOut)
+async def reactivate_teacher(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_school_admin),
+):
+    result = await db.execute(
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    teacher.status = "active"
+    teacher.rejected_reason = None
+    await db.commit()
+    await db.refresh(teacher)
+    return _teacher_out(teacher)
+
 
 @router.get(
     "/teachers/{teacher_id}/subjects",
@@ -824,7 +905,11 @@ async def list_subject_recordings(
     await _get_owned_subject(subject_id, school_admin.school_id, db)
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter).selectinload(Chapter.documents),
+            selectinload(Recording.chapter).selectinload(Chapter.knowledge),
+        )
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )
@@ -840,6 +925,14 @@ async def list_subject_reports(
     await _get_owned_subject(subject_id, school_admin.school_id, db)
     result = await db.execute(
         select(LLMReport)
+        .options(
+            selectinload(LLMReport.recording)
+            .selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(LLMReport.recording)
+            .selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
         .join(Recording, LLMReport.recording_id == Recording.id)
         .where(Recording.subject_id == subject_id)
         .order_by(LLMReport.created_at.desc())
@@ -1271,10 +1364,12 @@ def _build_school_admin_profile(admin: SchoolAdmin) -> SchoolAdminProfileOut:
         id=admin.id,
         name=admin.name,
         email=admin.email,
+        status=getattr(admin, "status", "active") or "active",
+        rejected_reason=getattr(admin, "rejected_reason", None),
         profile_pic_url=admin.profile_pic_url,
         school_id=admin.school_id,
-        school_name=school.name,
-        school_logo_url=school.logo_url,
-        school_address=school.address,
+        school_name=school.name if school else "",
+        school_logo_url=school.logo_url if school else None,
+        school_address=school.address if school else None,
         created_at=admin.created_at,
     )

@@ -10,6 +10,7 @@ from app.models.class_ import Class
 from app.models.subject import Subject
 from app.models.recording import Recording
 from app.models.student import Student
+from app.models.chapter import Chapter
 from app.schemas.school import SchoolOut
 from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
@@ -124,7 +125,11 @@ async def list_recordings(
 
     result = await db.execute(
         select(Recording)
-        .options(selectinload(Recording.report))
+        .options(
+            selectinload(Recording.report),
+            selectinload(Recording.chapter).selectinload(Chapter.documents),
+            selectinload(Recording.chapter).selectinload(Chapter.knowledge),
+        )
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )
