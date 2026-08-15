@@ -127,15 +127,23 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 audio_path=tmp_audio,
             )
 
-            report = LLMReport(
-                recording_id=recording_id,
-                overall_score=report_data["overall_score"],
-                teaching_quality_notes=report_data["teaching_quality_notes"],
-                score_breakdown=report_data["score_breakdown"],
-                quantitative_metrics=report_data["quantitative_metrics"],
-                raw_llm_response=report_data["raw_llm_response"],
-            )
-            session.add(report)
+            report = session.query(LLMReport).filter_by(recording_id=recording_id).first()
+            if report:
+                report.overall_score = report_data["overall_score"]
+                report.teaching_quality_notes = report_data["teaching_quality_notes"]
+                report.score_breakdown = report_data["score_breakdown"]
+                report.quantitative_metrics = report_data["quantitative_metrics"]
+                report.raw_llm_response = report_data["raw_llm_response"]
+            else:
+                report = LLMReport(
+                    recording_id=recording_id,
+                    overall_score=report_data["overall_score"],
+                    teaching_quality_notes=report_data["teaching_quality_notes"],
+                    score_breakdown=report_data["score_breakdown"],
+                    quantitative_metrics=report_data["quantitative_metrics"],
+                    raw_llm_response=report_data["raw_llm_response"],
+                )
+                session.add(report)
 
             recording.status = RecordingStatus.completed
             recording.error_reason = None

@@ -434,3 +434,79 @@ async def test_delete_recording(client, db_session, teacher_token, subject, teac
     )
     assert result.scalar_one_or_none() is None
 
+
+async def test_get_teacher_recording_detail(client, db_session, teacher_token, subject, teacher_user):
+    recording = Recording(
+        subject_id=subject.id,
+        teacher_id=teacher_user.id,
+        cloudinary_url="https://fake.cloudinary.com/test-detail.mp3",
+        cloudinary_public_id="fake/test-detail",
+        lecture_title="Detail Lecture",
+    )
+    db_session.add(recording)
+    await db_session.commit()
+    await db_session.refresh(recording)
+
+    resp = await client.get(
+        f"/teacher/recordings/{recording.id}",
+        headers={"Authorization": teacher_token},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == recording.id
+    assert data["lecture_title"] == "Detail Lecture"
+
+
+async def test_replace_recording_upload(client, db_session, teacher_token, subject, audio_bytes):
+    from app.models.chapter import Chapter
+    from app.models.learning_plan import LearningPlan
+
+    chapter = Chapter(name="Replace Test Chapter", subject_id=subject.id)
+    db_session.add(chapter)
+    await db_session.commit()
+    await db_session.refresh(chapter)
+
+    lp = LearningPlan(chapter_id=chapter.id, topic_name="Topic 1", sub_topic="Subtopic 1")
+    db_session.add(lp)
+    await db_session.commit()
+    await db_session.refresh(lp)
+
+    # 1. First upload for this learning plan
+    resp1 = await client.post(
+        f"/teacher/subjects/{subject.id}/recordings",
+        headers={"Authorization": teacher_token},
+        files={"file": ("first_audio.wav", audio_bytes, "audio/wav")},
+        data={"chapter_id": str(chapter.id), "learning_plan_id": str(lp.id), "lecture_title": "Subtopic 1"},
+    )
+    assert resp1.status_code == 201
+    rec1_id = resp1.json()["id"]
+
+    # 2. Upload replacement audio for same learning plan
+    resp2 = await client.post(
+        f"/teacher/subjects/{subject.id}/recordings",
+        headers={"Authorization": teacher_token},
+        files={"file": ("second_audio.wav", audio_bytes, "audio/wav")},
+        data={
+            "chapter_id": str(chapter.id),
+            "learning_plan_id": str(lp.id),
+            "replace_recording_id": str(rec1_id),
+            "lecture_title": "Subtopic 1 Updated",
+        },
+    )
+    assert resp2.status_code == 201
+    data2 = resp2.json()
+    assert data2["id"] == rec1_id
+    assert data2["lecture_title"] == "Subtopic 1 Updated"
+
+    # Verify strictly 1 recording exists for this learning plan in the DB
+    result = await db_session.execute(
+        select(Recording).where(
+            Recording.learning_plan_id == lp.id,
+            Recording.is_archived == False,
+        )
+    )
+    recordings = result.scalars().all()
+    assert len(recordings) == 1
+    assert recordings[0].id == rec1_id
+
+

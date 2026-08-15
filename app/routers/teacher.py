@@ -706,14 +706,17 @@ async def upload_recording(
     description: str | None = Form(None),
     transcription: str | None = Form(None),
     duration_seconds: float | None = Form(None),
+    replace_recording_id: int | None = Form(None),
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_active_teacher),
 ):
     from app.models.chapter import Chapter
 
-    await chapter_service.get_teacher_owned_subject(db,
-    subject_id,
-    teacher.id,)
+    await chapter_service.get_teacher_owned_subject(
+        db,
+        subject_id,
+        teacher.id,
+    )
 
     # Validate chapter exists and belongs to the subject
     res = await db.execute(
@@ -735,20 +738,97 @@ async def upload_recording(
 
     upload_result = await upload_audio(file, subject_id)
 
-    recording = Recording(
-        subject_id=subject_id,
-        chapter_id=chapter_id,
-        learning_plan_id=learning_plan_id,
-        teacher_id=teacher.id,
-        chapter_name=chapter_obj.name,
-        lecture_title=lecture_title or None,
-        description=description or None,
-        transcription=transcription or None,
-        cloudinary_url=upload_result["url"],
-        cloudinary_public_id=upload_result["public_id"],
-        duration_seconds=duration_seconds if duration_seconds is not None else upload_result.get("duration"),
-    )
-    db.add(recording)
+    # Check if this replaces an existing recording (explicit ID or matching learning plan)
+    existing_recording = None
+    if replace_recording_id:
+        res_rec = await db.execute(
+            select(Recording).where(
+                Recording.id == replace_recording_id,
+                Recording.teacher_id == teacher.id,
+            )
+        )
+        existing_recording = res_rec.scalar_one_or_none()
+    elif learning_plan_id:
+        res_rec = await db.execute(
+            select(Recording).where(
+                Recording.learning_plan_id == learning_plan_id,
+                Recording.teacher_id == teacher.id,
+                Recording.is_archived == False,
+            )
+        )
+        existing_recording = res_rec.scalar_one_or_none()
+
+    if existing_recording:
+        # Delete old LLM report so a fresh report is generated for new audio
+        report_res = await db.execute(
+            select(LLMReport).where(LLMReport.recording_id == existing_recording.id)
+        )
+        old_report = report_res.scalar_one_or_none()
+        if old_report:
+            await db.delete(old_report)
+
+        existing_recording.chapter_id = chapter_id
+        existing_recording.learning_plan_id = learning_plan_id
+        existing_recording.chapter_name = chapter_obj.name
+        if lecture_title:
+            existing_recording.lecture_title = lecture_title
+        if description is not None:
+            existing_recording.description = description or None
+        existing_recording.transcription = transcription or None
+        existing_recording.cloudinary_url = upload_result["url"]
+        existing_recording.cloudinary_public_id = upload_result["public_id"]
+        existing_recording.duration_seconds = (
+            duration_seconds if duration_seconds is not None else upload_result.get("duration")
+        )
+        existing_recording.status = RecordingStatus.pending
+        existing_recording.error_reason = None
+        existing_recording.processed_at = None
+        existing_recording.uploaded_at = func.now()
+
+        # Clean up any other duplicate recordings for this learning plan to ensure strictly 1 audio
+        if learning_plan_id:
+            dup_res = await db.execute(
+                select(Recording).where(
+                    Recording.learning_plan_id == learning_plan_id,
+                    Recording.teacher_id == teacher.id,
+                    Recording.id != existing_recording.id,
+                    Recording.is_archived == False,
+                )
+            )
+            for dup in dup_res.scalars().all():
+                await db.delete(dup)
+
+        recording = existing_recording
+    else:
+        # If learning_plan_id is supplied, clean up any existing recordings for that plan
+        if learning_plan_id:
+            dup_res = await db.execute(
+                select(Recording).where(
+                    Recording.learning_plan_id == learning_plan_id,
+                    Recording.teacher_id == teacher.id,
+                    Recording.is_archived == False,
+                )
+            )
+            for dup in dup_res.scalars().all():
+                await db.delete(dup)
+
+        recording = Recording(
+            subject_id=subject_id,
+            chapter_id=chapter_id,
+            learning_plan_id=learning_plan_id,
+            teacher_id=teacher.id,
+            chapter_name=chapter_obj.name,
+            lecture_title=lecture_title or None,
+            description=description or None,
+            transcription=transcription or None,
+            cloudinary_url=upload_result["url"],
+            cloudinary_public_id=upload_result["public_id"],
+            duration_seconds=(
+                duration_seconds if duration_seconds is not None else upload_result.get("duration")
+            ),
+        )
+        db.add(recording)
+
     await db.commit()
 
     # Enqueue async LLM processing
@@ -767,6 +847,32 @@ async def upload_recording(
         .where(Recording.id == recording.id)
     )
     return result.scalar_one()
+
+
+@router.get("/recordings/{recording_id}", response_model=RecordingWithReport)
+async def get_teacher_recording(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    result = await db.execute(
+        select(Recording)
+        .options(
+            selectinload(Recording.teacher),
+            selectinload(Recording.subject),
+            selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.documents),
+            selectinload(Recording.chapter)
+            .selectinload(Chapter.knowledge),
+        )
+        .where(Recording.id == recording_id, Recording.teacher_id == teacher.id)
+    )
+    recording = result.scalar_one_or_none()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return recording
 
 
 @router.post("/recordings/{recording_id}/retry", response_model=RecordingWithReport)
