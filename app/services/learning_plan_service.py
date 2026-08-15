@@ -82,8 +82,8 @@ async def delete_learning_plan(db: AsyncSession, plan_id: int) -> None:
 
 
 SUBJECT_TEMPLATE_HEADERS = [
-    "Topic Name",
-    "Sub Topic",
+    "Chapter Name",
+    "Lecture Title",
     "Date",
     "Classwork Activities",
     "Assessment Task",
@@ -100,8 +100,8 @@ def build_subject_learning_plan_template_workbook() -> io.BytesIO:
     ws.append(SUBJECT_TEMPLATE_HEADERS)
     ws.append(
         [
-            "Introduction to Chemical Reactions",  # Topic Name (Acts as Chapter Name)
-            "Physical vs Chemical Changes",  # Sub Topic
+            "Introduction to Chemical Reactions",  # Chapter Name
+            "Physical vs Chemical Changes",  # Lecture Title
             "2026-08-01",  # Date
             "Class discussion and small experiment with baking soda and vinegar",  # Classwork Activities
             "Short quiz on chemical change indicators",  # Assessment Task
@@ -124,7 +124,7 @@ async def import_subject_learning_plans_from_excel(
     subject_id: int,
     file_bytes: bytes,
 ) -> list[LearningPlanOut]:
-    """Parses learning plans from Excel bytes at subject level, mapping Topic Name directly to Chapter Name."""
+    """Parses learning plans from Excel bytes at subject level, mapping Chapter Name directly to Chapter Name."""
     from app.models.subject import Subject
     subject = await db.get(Subject, subject_id)
     if not subject:
@@ -155,18 +155,18 @@ async def import_subject_learning_plans_from_excel(
         return None
 
     idx_date = col("date")
-    idx_topic = col("topic name", "topic")
-    idx_sub_topic = col("sub topic", "sub-topic", "subtopic")
+    idx_topic = col("chapter name", "chapter", "topic name", "topic")
+    idx_sub_topic = col("lecture title", "lecture", "sub topic", "sub-topic", "subtopic")
     idx_classwork = col("classwork activities", "classwork")
     idx_assessment = col("assessment task", "assessment")
     idx_teaching_aids = col("teaching aids", "aids")
     idx_outcomes = col("learning outcomes", "outcomes")
 
-    # Topic Name and Sub Topic are required
+    # Chapter Name and Lecture Title are required
     if idx_topic is None or idx_sub_topic is None:
         raise HTTPException(
             status_code=400,
-            detail="The sheet is missing required columns. Expected at least: 'Topic Name' and 'Sub Topic'."
+            detail="The sheet is missing required columns. Expected at least: 'Chapter Name' and 'Lecture Title'."
         )
 
     # Pre-fetch existing chapters for the subject to avoid duplicates
@@ -188,10 +188,10 @@ async def import_subject_learning_plans_from_excel(
         if not topic_name or not sub_topic:
             raise HTTPException(
                 status_code=400,
-                detail=f"Row {row_number} is missing required fields: 'Topic Name' and 'Sub Topic' are required."
+                detail=f"Row {row_number} is missing required fields: 'Chapter Name' and 'Lecture Title' are required."
             )
 
-        # Topic Name acts directly as the Chapter Name
+        # Chapter Name acts directly as the Chapter Name
         chapter_name = topic_name
         chapter_key = chapter_name.lower()
         if chapter_key in chapters_by_name:

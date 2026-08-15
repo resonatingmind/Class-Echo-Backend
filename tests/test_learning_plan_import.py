@@ -125,3 +125,25 @@ async def test_import_learning_plans_validation_errors(client: AsyncClient, scho
     )
     assert resp.status_code == 400
     assert "missing required field" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_import_learning_plans_with_chapter_and_lecture_headers(client: AsyncClient, school_admin_token, subject):
+    excel_bytes = generate_test_excel([
+        ["Chapter Name", "Lecture Title", "Date", "Classwork Activities", "Assessment Task", "Teaching Aids", "Learning Outcomes"],
+        ["Cell Biology", "Mitochondria & Respiration", "2026-08-10", "ATP cycle explanation", "Pop quiz", "Diagrams", "Know ATP function"],
+    ])
+
+    files = {"file": ("biology.xlsx", excel_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    
+    resp = await client.post(
+        f"/school/subjects/{subject.id}/learning-plans/import",
+        files=files,
+        headers={"Authorization": school_admin_token}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["topic_name"] == "Cell Biology"
+    assert data[0]["sub_topic"] == "Mitochondria & Respiration"
+    assert data[0]["date"] == "2026-08-10"

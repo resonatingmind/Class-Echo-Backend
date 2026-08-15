@@ -113,8 +113,8 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
     if lp and isinstance(lp, dict):
         learning_plan_info = (
             f"Date: {lp.get('date') or 'N/A'}\n"
-            f"Topic: {lp.get('topic_name') or 'N/A'}\n"
-            f"Sub-Topic: {lp.get('sub_topic') or 'N/A'}\n"
+            f"Chapter: {lp.get('topic_name') or 'N/A'}\n"
+            f"Lecture: {lp.get('sub_topic') or 'N/A'}\n"
             f"Classwork, Key Strategies & Activities: {lp.get('classwork_activities') or 'N/A'}\n"
             f"Assessment / Extension Task: {lp.get('assessment_task') or 'N/A'}\n"
             f"Teaching Aids: {lp.get('teaching_aids') or 'N/A'}\n"
@@ -122,14 +122,14 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
         )
     elif reference_context.get("chapter_learning_plans"):
         plans_list = reference_context.get("chapter_learning_plans")
-        learning_plan_info = "Chapter Micro Planner Plans:\n" + "\n".join(
+        learning_plan_info = "Chapter Lecture Plans:\n" + "\n".join(
             [
-                f"- Topic: {p.get('topic_name')} | Sub-Topic: {p.get('sub_topic')} | Activities: {p.get('classwork_activities')} | Outcomes: {p.get('learning_outcomes')}"
+                f"- Chapter: {p.get('topic_name')} | Lecture: {p.get('sub_topic')} | Activities: {p.get('classwork_activities')} | Outcomes: {p.get('learning_outcomes')}"
                 for p in plans_list
             ]
         )
     else:
-        learning_plan_info = "No specific Micro Planner learning plan selected for this lecture."
+        learning_plan_info = "No specific Lecture Planner entry selected for this lecture."
 
     prompt = EVALUATION_PROMPT_TEMPLATE.format(
         transcript=transcript,
