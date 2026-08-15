@@ -13,7 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN find /app -name "._*" -delete && chmod +x start.sh
+RUN find /app -name "._*" -delete && \
+    sed -i 's/\r$//' start.sh && \
+    chmod +x start.sh
 
 EXPOSE 8000
 
