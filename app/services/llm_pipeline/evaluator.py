@@ -246,26 +246,35 @@ def transcribe_audio(audio_path: str) -> str:
             "between Hindi and English (Hinglish) or other Indian regional languages."
         )
         started = time.monotonic()
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                types.Part.from_uri(
-                    file_uri=file_ref.uri,
-                    mime_type=file_ref.mime_type,
-                ),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                # Verbatim transcription gains nothing from reasoning tokens,
-                # and flash models think by default — this is the single
-                # largest chunk of processing latency. Gemini 3.x rejects
-                # thinking_budget outright, so use thinking_level.
-                thinking_config=types.ThinkingConfig(thinking_level="low"),
-                http_options=types.HttpOptions(timeout=TRANSCRIBE_TIMEOUT_MS),
-            ),
-        )
-        logger.info("Transcription completed in %.1fs", time.monotonic() - started)
-        return response.text or ""
+        
+        models_to_try = [GEMINI_MODEL, FALLBACK_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"]
+        # Remove duplicates while preserving order
+        unique_models = []
+        for m in models_to_try:
+            if m not in unique_models:
+                unique_models.append(m)
+
+        for model in unique_models:
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        types.Part.from_uri(
+                            file_uri=file_ref.uri,
+                            mime_type=file_ref.mime_type,
+                        ),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        http_options=types.HttpOptions(timeout=TRANSCRIBE_TIMEOUT_MS),
+                    ),
+                )
+                logger.info("Transcription completed in %.1fs using model %s", time.monotonic() - started, model)
+                return response.text or ""
+            except (genai_errors.ServerError, genai_errors.APIError, Exception) as exc:
+                if model == unique_models[-1]:
+                    raise
+                logger.warning("Transcription model %s failed (%s), trying fallback model...", model, exc)
     finally:
         if file_ref is not None:
             try:
