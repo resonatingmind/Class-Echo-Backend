@@ -259,34 +259,71 @@ def transcribe_audio(audio_path: str) -> str:
             "between Hindi and English (Hinglish) or other Indian regional languages."
         )
         started = time.monotonic()
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                types.Part.from_uri(
-                    file_uri=file_ref.uri,
-                    mime_type=file_ref.mime_type,
-                ),
-                prompt,
-            ],
-            config=types.GenerateContentConfig(
-                # Verbatim transcription gains nothing from reasoning tokens,
-                # and flash models think by default — this is the single
-                # largest chunk of processing latency. Gemini 3.x rejects
-                # thinking_budget outright, so use thinking_level.
-                thinking_config=types.ThinkingConfig(thinking_level="low"),
-                http_options=types.HttpOptions(timeout=TRANSCRIBE_TIMEOUT_MS),
-            ),
-        )
-        logger.info("Transcription completed in %.1fs", time.monotonic() - started)
-        transcript = response.text or ""
-        if not transcript.strip():
-            # An empty transcript makes every downstream score meaningless, and
-            # the evaluation prompt would silently be handed "N/A" audio.
-            raise RuntimeError(
-                "The AI service could not transcribe any speech from this "
-                "recording. Check that the audio contains audible speech."
-            )
-        return transcript
+
+        # Try the primary model, then progressively older ones. A model that has
+        # been retired or is not gated to this API key answers 404, so a single
+        # hardcoded model means every recording fails until someone edits code.
+        models_to_try = [GEMINI_MODEL, FALLBACK_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"]
+        unique_models: list[str] = []
+        for m in models_to_try:
+            if m and m not in unique_models:
+                unique_models.append(m)
+
+        for model in unique_models:
+            try:
+                config_kwargs = {
+                    "http_options": types.HttpOptions(timeout=TRANSCRIBE_TIMEOUT_MS),
+                }
+                # Verbatim transcription gains nothing from reasoning tokens, and
+                # flash models think by default — this is the single largest chunk
+                # of processing latency. Only the 3.x line accepts thinking_level
+                # (2.x wants thinking_budget and rejects this outright), so it is
+                # applied per model rather than globally.
+                if model.startswith("gemini-3"):
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_level="low"
+                    )
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        types.Part.from_uri(
+                            file_uri=file_ref.uri,
+                            mime_type=file_ref.mime_type,
+                        ),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                logger.info(
+                    "Transcription completed in %.1fs using model %s",
+                    time.monotonic() - started,
+                    model,
+                )
+
+                transcript = response.text or ""
+                if not transcript.strip():
+                    # An empty transcript makes every downstream score
+                    # meaningless, and the evaluation prompt would silently be
+                    # handed "N/A" audio. Raising here also lets the next model
+                    # have a go before the whole recording is failed.
+                    raise RuntimeError(
+                        "The AI service could not transcribe any speech from "
+                        "this recording. Check that the audio contains audible "
+                        "speech."
+                    )
+                return transcript
+            except Exception as exc:
+                if model == unique_models[-1]:
+                    raise
+                logger.warning(
+                    "Transcription model %s failed (%s), trying fallback model...",
+                    model,
+                    exc,
+                )
+
+        # Defensive: the loop above either returns or re-raises on the last model.
+        raise RuntimeError("No Gemini model was able to transcribe the recording.")
     finally:
         if file_ref is not None:
             try:
