@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -39,6 +41,33 @@ from app.schemas.timetable import TimetableEntryOut
 from app.services.timetable_service import build_timetable_entry_out, day_sort_index
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+
+async def _queue_analysis(db: AsyncSession, recording: Recording) -> None:
+    """
+    Hand the recording to the Celery worker for analysis.
+
+    The audio itself is already stored and committed by the time we get here, so
+    a broker that is down must not fail the request: the unguarded `.delay()`
+    returned a 500 for an upload that had actually succeeded, which invited the
+    teacher to upload the same lecture again. The recording is instead marked
+    failed with a reason, which the detail screen already renders next to a
+    "Retry analysis" button.
+    """
+    try:
+        process_recording.delay(recording.id, recording.cloudinary_url)
+    except Exception:
+        logger.exception(
+            "Could not queue analysis for recording %s", recording.id
+        )
+        recording.status = RecordingStatus.failed
+        recording.error_reason = (
+            "The audio was saved, but the analysis service could not be "
+            "reached. Tap Retry analysis once it is back online."
+        )
+        await db.commit()
 
 
 # ─── TIMETABLE (read-only) ─────────────────────────────────────────────────
@@ -736,7 +765,7 @@ async def upload_recording(
             detail=f"Unsupported file type '{file.content_type}'. Upload an audio file.",
         )
 
-    upload_result = await upload_audio(file, subject_id)
+    upload_result = await upload_audio(file, subject_id, content_type=mime)
 
     # Check if this replaces an existing recording (explicit ID or matching learning plan)
     existing_recording = None
@@ -768,7 +797,11 @@ async def upload_recording(
             await db.delete(old_report)
 
         existing_recording.chapter_id = chapter_id
-        existing_recording.learning_plan_id = learning_plan_id
+        # Only re-point the lecture link when one was actually supplied.
+        # Assigning unconditionally wiped the association whenever a recording
+        # was replaced without passing its learning_plan_id along.
+        if learning_plan_id is not None:
+            existing_recording.learning_plan_id = learning_plan_id
         existing_recording.chapter_name = chapter_obj.name
         if lecture_title:
             existing_recording.lecture_title = lecture_title
@@ -832,7 +865,7 @@ async def upload_recording(
     await db.commit()
 
     # Enqueue async LLM processing
-    process_recording.delay(recording.id, recording.cloudinary_url)
+    await _queue_analysis(db, recording)
 
     result = await db.execute(
         select(Recording)
@@ -903,12 +936,12 @@ async def retry_recording(
             status_code=400, detail="This recording has already been analysed"
         )
 
-    recording.status = "pending"
+    recording.status = RecordingStatus.pending
     recording.processed_at = None
     recording.error_reason = None
     await db.commit()
 
-    process_recording.delay(recording.id, recording.cloudinary_url)
+    await _queue_analysis(db, recording)
 
     result = await db.execute(
         select(Recording)

@@ -158,8 +158,11 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
         # wait out, so retrying only burns the next day's quota and leaves the
         # recording sitting in `processing` for hours. Fail it immediately.
         quota_scope = _quota_scope(exc)
+        permanent = _is_permanent(exc)
         is_final_attempt = (
-            quota_scope == "daily" or self.request.retries >= self.max_retries
+            quota_scope == "daily"
+            or permanent
+            or self.request.retries >= self.max_retries
         )
 
         logger.error(
@@ -190,7 +193,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 exc_info=True,
             )
 
-        if quota_scope == "daily":
+        if quota_scope == "daily" or permanent:
             raise
 
         # For a short-window (per-minute) quota the API tells us exactly how
@@ -204,6 +207,22 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 os.remove(tmp_audio)
             except OSError:
                 logger.warning("Could not remove temp audio file %s", tmp_audio)
+
+
+def _is_permanent(exc: Exception) -> bool:
+    """
+    True for failures that cannot possibly succeed on a retry.
+
+    Retrying these burned two extra Gemini calls per recording and left the
+    teacher watching "Retrying (2/3)" for minutes before the same verdict.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return True
+    if isinstance(exc, EnvironmentError) and "GEMINI_API_KEY" in str(exc):
+        return True
+    if isinstance(exc, RuntimeError) and "could not transcribe" in str(exc).lower():
+        return True
+    return False
 
 
 def _quota_scope(exc: Exception) -> str | None:
@@ -267,6 +286,10 @@ def _classify_error(exc: Exception) -> str:
 
     if isinstance(exc, RuntimeError) and "failed to process" in msg.lower():
         return "The AI service could not process the audio file. The file may be corrupted or in an unsupported format."
+
+    if isinstance(exc, RuntimeError) and "could not transcribe" in msg.lower():
+        # Already written for a teacher to read.
+        return msg
 
     # Fallback: include the exception type and a truncated message
     exc_type = type(exc).__name__

@@ -8,6 +8,15 @@ from app.config import settings
 
 from botocore.config import Config
 
+# When object storage is not configured, files are written to ./uploads and
+# served by the API itself. The Celery worker has to fetch them back over HTTP,
+# so the host in that URL has to be reachable *from the worker* — not just from
+# a browser. It defaults to the old hardcoded loopback address, which is right
+# whenever the worker shares a container with the API.
+INTERNAL_API_BASE_URL = (
+    os.environ.get("INTERNAL_API_BASE_URL") or "http://127.0.0.1:8000"
+).rstrip("/")
+
 s3_client = boto3.client(
     "s3",
     aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
@@ -17,12 +26,48 @@ s3_client = boto3.client(
     config=Config(signature_version="s3v4"),
 )
 
-async def upload_audio(file: UploadFile, subject_id: int) -> dict:
+# The extension the audio is stored under decides which MIME type the analysis
+# worker declares to Gemini. A browser recording arrives as webm; storing it as
+# ".m4a" because the client happened to name it that made Gemini reject the file
+# with "failed to process the audio". So trust the resolved content type first
+# and only fall back to the client-supplied filename.
+AUDIO_SUFFIX_BY_MIME = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+}
+
+KNOWN_AUDIO_SUFFIXES = set(AUDIO_SUFFIX_BY_MIME.values())
+
+
+def _audio_suffix(file: UploadFile, content_type: str | None) -> str:
+    resolved = (content_type or file.content_type or "").split(";")[0].strip().lower()
+    from_mime = AUDIO_SUFFIX_BY_MIME.get(resolved)
+    if from_mime:
+        return from_mime
+
+    from_name = os.path.splitext(file.filename or "")[-1].lower()
+    if from_name in KNOWN_AUDIO_SUFFIXES:
+        return from_name
+
+    return from_name or ".mp3"
+
+
+async def upload_audio(
+    file: UploadFile, subject_id: int, content_type: str | None = None
+) -> dict:
     """Upload an audio file to AWS S3 and return url + public_id + duration."""
     contents = await file.read()
-    
+
     # 1. Determine duration using tinytag
-    suffix = os.path.splitext(file.filename or "")[-1] or ".mp3"
+    suffix = _audio_suffix(file, content_type)
     duration = None
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(contents)
@@ -46,7 +91,7 @@ async def upload_audio(file: UploadFile, subject_id: int) -> dict:
                     Bucket=settings.AWS_STORAGE_BUCKET_NAME,
                     Key=key,
                     Body=contents,
-                    ContentType=file.content_type or "audio/mpeg",
+                    ContentType=content_type or file.content_type or "audio/mpeg",
                     ACL="public-read"
                 )
             except Exception:
@@ -54,7 +99,7 @@ async def upload_audio(file: UploadFile, subject_id: int) -> dict:
                     Bucket=settings.AWS_STORAGE_BUCKET_NAME,
                     Key=key,
                     Body=contents,
-                    ContentType=file.content_type or "audio/mpeg"
+                    ContentType=content_type or file.content_type or "audio/mpeg"
                 )
         except Exception as exc:
             print("S3 UPLOAD ERROR:", exc)
@@ -89,7 +134,7 @@ async def upload_audio(file: UploadFile, subject_id: int) -> dict:
         with open(file_path, "wb") as f:
             f.write(contents)
 
-        url = f"http://127.0.0.1:8000/{file_path}"
+        url = f"{INTERNAL_API_BASE_URL}/{file_path}"
 
         return {
             "url": url,
@@ -220,7 +265,7 @@ async def upload_document(file: UploadFile, folder: str) -> dict:
         with open(file_path, "wb") as f:
             f.write(contents)
 
-        url = f"http://127.0.0.1:8000/{file_path}"
+        url = f"{INTERNAL_API_BASE_URL}/{file_path}"
 
         return {
             "url": url,

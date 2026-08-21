@@ -162,8 +162,21 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
                 raise
             logger.warning("Model %s not available (404), falling back to %s", model, FALLBACK_MODEL)
 
+    # Unreachable while the loop has at least one model that either returns or
+    # raises, but an explicit failure beats returning None into the JSON parser.
+    raise RuntimeError("No Gemini model was able to evaluate the recording.")
 
-def _parse_response(raw: str) -> dict:
+
+def _parse_response(raw: str | None) -> dict:
+    # A safety-blocked or truncated generation yields `response.text is None`,
+    # which used to blow up inside re.sub with an opaque TypeError instead of
+    # the "AI returned an unreadable response, please retry" the UI knows how
+    # to explain.
+    if not raw or not raw.strip():
+        raise ValueError(
+            "Gemini returned non-JSON output.\nRaw:\n<empty response>"
+        )
+
     cleaned = re.sub(r"```(?:json)?\s*", "", raw).replace("```", "").strip()
     try:
         return json.loads(cleaned)
@@ -265,7 +278,15 @@ def transcribe_audio(audio_path: str) -> str:
             ),
         )
         logger.info("Transcription completed in %.1fs", time.monotonic() - started)
-        return response.text or ""
+        transcript = response.text or ""
+        if not transcript.strip():
+            # An empty transcript makes every downstream score meaningless, and
+            # the evaluation prompt would silently be handed "N/A" audio.
+            raise RuntimeError(
+                "The AI service could not transcribe any speech from this "
+                "recording. Check that the audio contains audible speech."
+            )
+        return transcript
     finally:
         if file_ref is not None:
             try:

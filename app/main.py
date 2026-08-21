@@ -87,3 +87,58 @@ app.include_router(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/analysis")
+async def analysis_health():
+    """
+    Report whether recording analysis can actually run.
+
+    A missing Redis instance or a worker that never started is invisible from
+    the app — uploads simply never leave "pending" — and it was the hardest
+    part of this pipeline to diagnose from the outside. This endpoint names the
+    broken piece directly.
+    """
+    from celery_worker import celery_app
+
+    detail: dict = {"broker": "unknown", "workers": 0, "storage": "local disk"}
+
+    if os.getenv("AWS_STORAGE_BUCKET_NAME") not in (None, "", "test-bucket"):
+        detail["storage"] = "s3"
+
+    # A fresh kombu Connection, not celery's pooled one: the pooled connection
+    # is lazy, so ensure_connection() on it reports success without ever
+    # touching the broker.
+    from kombu import Connection
+
+    try:
+        with Connection(celery_app.conf.broker_url) as conn:
+            conn.ensure_connection(max_retries=0, timeout=3)
+        detail["broker"] = "reachable"
+    except Exception as exc:
+        detail["broker"] = "unreachable"
+        detail["broker_error"] = str(exc)[:200]
+
+    if detail["broker"] == "reachable":
+        try:
+            replies = celery_app.control.ping(timeout=3) or []
+            detail["workers"] = len(replies)
+        except Exception as exc:
+            detail["worker_error"] = str(exc)[:200]
+
+    if detail["broker"] != "reachable":
+        detail["status"] = "unavailable"
+        detail["hint"] = (
+            "Set REDIS_URL to a reachable Redis instance. Recordings will "
+            "upload but never be analysed until this is fixed."
+        )
+    elif detail["workers"] == 0:
+        detail["status"] = "degraded"
+        detail["hint"] = (
+            "Redis is reachable but no Celery worker answered. Start "
+            "'celery -A celery_worker.celery_app worker'."
+        )
+    else:
+        detail["status"] = "ok"
+
+    return detail
