@@ -101,10 +101,13 @@ async def analysis_health():
     """
     from celery_worker import celery_app
 
-    detail: dict = {"broker": "unknown", "workers": 0, "storage": "local disk"}
+    from app.config import settings
 
-    if os.getenv("AWS_STORAGE_BUCKET_NAME") not in (None, "", "test-bucket"):
-        detail["storage"] = "s3"
+    detail: dict = {
+        "broker": "unknown",
+        "workers": 0,
+        "storage": settings.storage_backend,
+    }
 
     # A fresh kombu Connection, not celery's pooled one: the pooled connection
     # is lazy, so ensure_connection() on it reports success without ever

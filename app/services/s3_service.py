@@ -1,3 +1,13 @@
+"""
+Storage façade.
+
+Despite the module name this dispatches to whichever backend is configured —
+Cloudinary, S3, or local disk — chosen by ``settings.storage_backend``. The name
+and the ``cloudinary_url`` column are both historical; keeping them avoids
+touching eleven call sites and a database migration for no behavioural gain.
+Renaming the module to ``storage_service`` is a worthwhile follow-up.
+"""
+
 import os
 import uuid
 import tempfile
@@ -17,14 +27,38 @@ INTERNAL_API_BASE_URL = (
     os.environ.get("INTERNAL_API_BASE_URL") or "http://127.0.0.1:8000"
 ).rstrip("/")
 
-s3_client = boto3.client(
-    "s3",
-    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-    region_name=settings.AWS_REGION,
-    endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com" if settings.AWS_REGION else None,
-    config=Config(signature_version="s3v4"),
-)
+class _LazyS3Client:
+    """
+    Defers boto3 client creation until something actually touches S3.
+
+    Building it at import time meant that dropping AWS_REGION — which is exactly
+    what happens when you move off S3 — raised NoRegionError while importing this
+    module, taking the entire API down at startup.
+    """
+
+    _client = None
+
+    def _get(self):
+        if _LazyS3Client._client is None:
+            _LazyS3Client._client = boto3.client(
+                "s3",
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_REGION,
+                endpoint_url=(
+                    f"https://s3.{settings.AWS_REGION}.amazonaws.com"
+                    if settings.AWS_REGION
+                    else None
+                ),
+                config=Config(signature_version="s3v4"),
+            )
+        return _LazyS3Client._client
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+s3_client = _LazyS3Client()
 
 # The extension the audio is stored under decides which MIME type the analysis
 # worker declares to Gemini. A browser recording arrives as webm; storing it as
@@ -63,7 +97,14 @@ def _audio_suffix(file: UploadFile, content_type: str | None) -> str:
 async def upload_audio(
     file: UploadFile, subject_id: int, content_type: str | None = None
 ) -> dict:
-    """Upload an audio file to AWS S3 and return url + public_id + duration."""
+    """Upload an audio file to the configured store; returns url + public_id + duration."""
+    if settings.storage_backend == "cloudinary":
+        from app.services import cloudinary_service
+
+        return await cloudinary_service.upload_audio(
+            file, subject_id, content_type=content_type
+        )
+
     contents = await file.read()
 
     # 1. Determine duration using tinytag
@@ -143,7 +184,12 @@ async def upload_audio(
         }
 
 async def upload_image(file: UploadFile, folder: str) -> dict:
-    """Upload an image to S3 and return url + public_id."""
+    """Upload an image to the configured store; returns url + public_id."""
+    if settings.storage_backend == "cloudinary":
+        from app.services import cloudinary_service
+
+        return await cloudinary_service.upload_image(file, folder)
+
     ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
     ct = (file.content_type or "").split(";")[0].strip().lower()
     if ct not in ALLOWED_IMAGE_TYPES:
@@ -192,7 +238,12 @@ async def upload_image(file: UploadFile, folder: str) -> dict:
     }
 
 async def upload_document(file: UploadFile, folder: str) -> dict:
-    """Upload a chapter document (PDF, DOCX, PPTX, TXT) to S3 and return url + public_id + file_type."""
+    """Upload a chapter document (PDF, DOCX, PPTX, TXT); returns url + public_id + file_type."""
+    if settings.storage_backend == "cloudinary":
+        from app.services import cloudinary_service
+
+        return await cloudinary_service.upload_document(file, folder)
+
     filename = file.filename or ""
     suffix = os.path.splitext(filename)[-1].lower()
     
@@ -274,6 +325,12 @@ async def upload_document(file: UploadFile, folder: str) -> dict:
         }
 
 def delete_audio(public_id: str) -> None:
+    if settings.storage_backend == "cloudinary":
+        from app.services import cloudinary_service
+
+        cloudinary_service.delete_audio(public_id)
+        return
+
     try:
         s3_client.delete_object(
             Bucket=settings.AWS_STORAGE_BUCKET_NAME,
