@@ -7,12 +7,14 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.core.deps import get_admin
-from app.core.security import generate_token_pair, verify_password
+from app.core.security import verify_password
 from app.config import settings
 from app.models.auth_token import AuthToken
-from app.tasks.email_tasks import send_email_task
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
+from app.models.teacher import Teacher
+from app.services import invite_service
+from app.services import teacher_onboarding_service as onboarding
 from app.models.class_ import Class
 from app.models.subject import Subject
 from app.models.student import Student
@@ -26,6 +28,13 @@ from app.schemas.school import (
     SchoolDeleteRequest,
 )
 from app.schemas.admin import AdminProfileOut
+from app.schemas.teacher import (
+    TeacherBulkInviteRequest,
+    TeacherBulkInviteResponse,
+    TeacherInviteEntry,
+    TeacherInviteResult,
+    TeacherOut,
+)
 from app.schemas.class_ import ClassOut
 from app.schemas.subject import SubjectOut
 from app.schemas.student import StudentOut
@@ -84,27 +93,54 @@ async def create_school(
     db.add(school_admin)
     await db.flush()  # get school_admin.id
 
-    raw_token, token_hash = generate_token_pair()
-    db.add(
-        AuthToken(
-            user_type="school_admin",
-            user_id=school_admin.id,
-            token_hash=token_hash,
-            purpose="invite",
-            expires_at=datetime.utcnow() + timedelta(days=7),
+    admin_token = await invite_service.issue_invite_token(db, "school_admin", school_admin.id)
+
+    # Teachers named at creation time are invited in the same transaction, so a
+    # failure part-way through does not leave a half-populated organisation.
+    teacher_invites: list[tuple[Teacher, str]] = []
+    for entry in body.teachers:
+        action, existing = await onboarding.classify_teacher_signup(db, entry.email, school.id)
+        if action != onboarding.CREATE_NEW:
+            # A brand new organisation cannot legitimately collide with itself,
+            # so this only fires when the address belongs to another account.
+            raise HTTPException(
+                status_code=409,
+                detail=f"{entry.email} is already registered on Class Echo",
+            )
+        teacher = Teacher(
+            name=entry.name,
+            email=entry.email,
+            hashed_password=None,
+            school_id=school.id,
+            status="invited",
         )
-    )
+        db.add(teacher)
+        await db.flush()
+        token = await invite_service.issue_invite_token(db, "teacher", teacher.id)
+        teacher_invites.append((teacher, token))
+
     await db.commit()
     await db.refresh(school)
 
-    invite_link = f"{settings.FRONTEND_URL}/accept-invite?token={raw_token}"
-    send_email_task.delay(
-        school_admin.email,
-        "You've been invited to Class Echo",
-        f"<p>Hi {school_admin.name},</p><p>You've been set up as the admin for "
-        f"{school.name} on Class Echo. Set your password to get started: "
-        f"<a href='{invite_link}'>{invite_link}</a></p>",
+    # Emails are queued only after the commit: queuing first can deliver an
+    # invite link whose account the transaction then rolls back.
+    invite_service.queue_invite_email(
+        to_email=school_admin.email,
+        to_name=school_admin.name,
+        organisation_name=school.name,
+        role_label="school admin",
+        raw_token=admin_token,
+        inviter_name=admin.name,
     )
+    for teacher, token in teacher_invites:
+        invite_service.queue_invite_email(
+            to_email=teacher.email,
+            to_name=teacher.name,
+            organisation_name=school.name,
+            role_label="teacher",
+            raw_token=token,
+            inviter_name=admin.name,
+        )
 
     result = await db.execute(
         select(School).options(selectinload(School.admin)).where(School.id == school.id)
@@ -268,6 +304,255 @@ async def _get_school_with_admin(school_id: int, db: AsyncSession) -> School:
         select(School).options(selectinload(School.admin)).where(School.id == school_id)
     )
     return result.scalar_one()
+
+
+@router.get("/schools/{school_id}/teachers", response_model=list[TeacherOut])
+async def list_school_teachers(
+    school_id: int,
+    status: str | None = Query(
+        None, description="Filter by invited/pending_approval/active/suspended/rejected"
+    ),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    await _get_school_with_admin(school_id, db)
+
+    query = (
+        select(Teacher)
+        .options(selectinload(Teacher.school))
+        .where(Teacher.school_id == school_id)
+        .order_by(Teacher.created_at.desc())
+    )
+    if status is not None:
+        query = query.where(Teacher.status == status)
+
+    result = await db.execute(query)
+    return [_teacher_out(t) for t in result.scalars().all()]
+
+
+@router.post(
+    "/schools/{school_id}/teachers/invite",
+    response_model=TeacherBulkInviteResponse,
+    status_code=201,
+)
+async def invite_school_teachers(
+    school_id: int,
+    body: TeacherBulkInviteRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    """Invite one or many teachers straight into an organisation.
+
+    Partial success is deliberate: pasting in a staff list where two addresses
+    already exist should still invite everyone else, and report what it skipped,
+    rather than rejecting the whole batch.
+    """
+    school = await _get_school_with_admin(school_id, db)
+
+    results: list[TeacherInviteResult] = []
+    pending: list[tuple[Teacher, str, TeacherInviteEntry]] = []
+    seen_emails: set[str] = set()
+
+    for entry in body.teachers:
+        email = entry.email.lower()
+        if email in seen_emails:
+            results.append(
+                TeacherInviteResult(
+                    email=entry.email,
+                    name=entry.name,
+                    outcome="skipped",
+                    reason="Duplicate address in this request",
+                )
+            )
+            continue
+        seen_emails.add(email)
+
+        action, existing = await onboarding.classify_teacher_signup(db, entry.email, school_id)
+
+        if action == onboarding.CONFLICT_TAKEN:
+            results.append(
+                TeacherInviteResult(
+                    email=entry.email,
+                    name=entry.name,
+                    outcome="skipped",
+                    reason="Already registered on Class Echo",
+                    teacher_id=existing.id if existing else None,
+                )
+            )
+            continue
+        if action == onboarding.CONFLICT_OTHER_SCHOOL:
+            results.append(
+                TeacherInviteResult(
+                    email=entry.email,
+                    name=entry.name,
+                    outcome="skipped",
+                    reason="Already belongs to a different organisation",
+                )
+            )
+            continue
+
+        if action in (
+            onboarding.EXISTING_INVITED_SAME_SCHOOL,
+            onboarding.EXISTING_PENDING_SAME_SCHOOL,
+        ):
+            teacher = existing
+            teacher.name = entry.name
+            # A super-admin invite supersedes a self-registration awaiting
+            # approval: accepting the emailed link is proof enough.
+            teacher.status = "invited"
+            outcome = "reinvited"
+        else:
+            teacher = Teacher(
+                name=entry.name,
+                email=entry.email,
+                hashed_password=None,
+                school_id=school_id,
+                status="invited",
+            )
+            db.add(teacher)
+            outcome = "invited"
+
+        await db.flush()
+        token = await invite_service.issue_invite_token(db, "teacher", teacher.id)
+        pending.append((teacher, token, entry))
+        results.append(
+            TeacherInviteResult(
+                email=entry.email,
+                name=entry.name,
+                outcome=outcome,
+                teacher_id=teacher.id,
+            )
+        )
+
+    await db.commit()
+
+    for teacher, token, _entry in pending:
+        invite_service.queue_invite_email(
+            to_email=teacher.email,
+            to_name=teacher.name,
+            organisation_name=school.name,
+            role_label="teacher",
+            raw_token=token,
+            inviter_name=admin.name,
+        )
+
+    return TeacherBulkInviteResponse(
+        invited_count=len(pending),
+        skipped_count=len(results) - len(pending),
+        results=results,
+    )
+
+
+@router.post("/schools/{school_id}/admin/resend-invite", status_code=202)
+async def resend_school_admin_invite(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    school = await _get_school_with_admin(school_id, db)
+    school_admin = await _get_school_admin_for_school(school_id, db)
+
+    if school_admin.status != "invited":
+        raise HTTPException(
+            status_code=409,
+            detail="This admin has already accepted their invitation",
+        )
+
+    token = await invite_service.issue_invite_token(db, "school_admin", school_admin.id)
+    await db.commit()
+
+    invite_service.queue_invite_email(
+        to_email=school_admin.email,
+        to_name=school_admin.name,
+        organisation_name=school.name,
+        role_label="school admin",
+        raw_token=token,
+        inviter_name=admin.name,
+    )
+    return {"detail": f"Invitation resent to {school_admin.email}"}
+
+
+@router.post("/schools/{school_id}/teachers/{teacher_id}/resend-invite", status_code=202)
+async def resend_teacher_invite(
+    school_id: int,
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    school = await _get_school_with_admin(school_id, db)
+
+    result = await db.execute(
+        select(Teacher).where(Teacher.id == teacher_id, Teacher.school_id == school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found in this organisation")
+    if teacher.status != "invited":
+        raise HTTPException(
+            status_code=409,
+            detail="This teacher has already accepted their invitation",
+        )
+
+    token = await invite_service.issue_invite_token(db, "teacher", teacher.id)
+    await db.commit()
+
+    invite_service.queue_invite_email(
+        to_email=teacher.email,
+        to_name=teacher.name,
+        organisation_name=school.name,
+        role_label="teacher",
+        raw_token=token,
+        inviter_name=admin.name,
+    )
+    return {"detail": f"Invitation resent to {teacher.email}"}
+
+
+@router.delete("/schools/{school_id}/teachers/{teacher_id}", status_code=204)
+async def revoke_teacher_invite(
+    school_id: int,
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Withdraw an invitation that has not been accepted yet.
+
+    Restricted to invited accounts: deleting an active teacher would orphan
+    their recordings, which is what the suspend flow is for.
+    """
+    result = await db.execute(
+        select(Teacher).where(Teacher.id == teacher_id, Teacher.school_id == school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found in this organisation")
+    if teacher.status != "invited":
+        raise HTTPException(
+            status_code=409,
+            detail="Only pending invitations can be revoked",
+        )
+
+    await db.execute(
+        delete(AuthToken).where(
+            AuthToken.user_type == "teacher", AuthToken.user_id == teacher.id
+        )
+    )
+    await db.delete(teacher)
+    await db.commit()
+
+
+def _teacher_out(t: Teacher) -> TeacherOut:
+    return TeacherOut(
+        id=t.id,
+        name=t.name,
+        email=t.email,
+        profile_image_url=t.profile_image_url,
+        school_id=t.school_id,
+        school_name=t.school.name if t.school else None,
+        created_at=t.created_at,
+        status=t.status,
+        email_verified=t.email_verified,
+        rejected_reason=t.rejected_reason,
+    )
 
 
 @router.get("/schools/{school_id}/classes", response_model=list[ClassOut])

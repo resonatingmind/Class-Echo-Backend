@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal 
-from pydantic import BaseModel, ConfigDict, EmailStr, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 from app.services.s3_service import sign_url
 
 
@@ -14,6 +14,33 @@ class TeacherCreate(BaseModel):
 class TeacherInviteRequest(BaseModel):
     name: str
     email: EmailStr
+
+
+class TeacherInviteEntry(BaseModel):
+    name: str
+    email: EmailStr
+
+
+class TeacherBulkInviteRequest(BaseModel):
+    """A super admin usually onboards a whole staff list in one go."""
+
+    teachers: list[TeacherInviteEntry] = Field(min_length=1, max_length=200)
+
+
+class TeacherInviteResult(BaseModel):
+    email: str
+    name: str
+    # "invited" (new account), "reinvited" (fresh link for a pending invite),
+    # or "skipped" with a reason - one bad address must not abort the batch.
+    outcome: Literal["invited", "reinvited", "skipped"]
+    teacher_id: int | None = None
+    reason: str | None = None
+
+
+class TeacherBulkInviteResponse(BaseModel):
+    invited_count: int
+    skipped_count: int
+    results: list[TeacherInviteResult]
 
 
 class TeacherRejectRequest(BaseModel):

@@ -34,8 +34,20 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str | None = None
     ADMIN_PASSWORD: str | None = None
 
-    # Email (invite / verification links). If SMTP_HOST is unset, email_service
-    # logs the message instead of sending — safe default for local dev.
+    # Email (invite / verification links). Mailjet is preferred; SMTP is the
+    # fallback; with neither configured email_service logs the message instead
+    # of sending — a safe default for local dev.
+    #
+    # MAILJET_FROM_EMAIL must be an address verified in the Mailjet dashboard
+    # (Account Settings -> Sender domains & addresses), otherwise Mailjet accepts
+    # the API call and then fails the message with "sender address not allowed".
+    MAILJET_API_KEY: str | None = None
+    MAILJET_API_SECRET: str | None = None
+    MAILJET_FROM_EMAIL: str | None = None
+    MAILJET_FROM_NAME: str = "Class Echo"
+    # Validates credentials and payload against Mailjet without delivering.
+    MAILJET_SANDBOX: bool = False
+
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
     SMTP_USER: str | None = None
@@ -60,6 +72,10 @@ class Settings(BaseSettings):
         "ADMIN_NAME",
         "ADMIN_EMAIL",
         "ADMIN_PASSWORD",
+        "MAILJET_API_KEY",
+        "MAILJET_API_SECRET",
+        "MAILJET_FROM_EMAIL",
+        "MAILJET_FROM_NAME",
         "SMTP_HOST",
         "SMTP_USER",
         "SMTP_PASSWORD",
@@ -77,6 +93,21 @@ class Settings(BaseSettings):
                 cleaned = cleaned[:-1].strip()
             return cleaned
         return value
+
+    @property
+    def mailjet_configured(self) -> bool:
+        return bool(
+            self.MAILJET_API_KEY and self.MAILJET_API_SECRET and self.MAILJET_FROM_EMAIL
+        )
+
+    @property
+    def email_backend(self) -> str:
+        """Which transport send_email() uses: mailjet, smtp, or log-only."""
+        if self.mailjet_configured:
+            return "mailjet"
+        if self.SMTP_HOST:
+            return "smtp"
+        return "log"
 
     @property
     def cloudinary_configured(self) -> bool:
@@ -120,6 +151,27 @@ class Settings(BaseSettings):
                 "No object storage configured (set CLOUDINARY_URL or the AWS_* "
                 "variables). Uploads will be written to ./uploads, which is "
                 "ephemeral on most hosts and unreachable from other containers."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def warn_unconfigured_email(self):
+        # Same philosophy as storage config above: never hard-fail startup, but
+        # do not let an invite-only product silently drop every invite either.
+        if self.email_backend == "log":
+            import logging
+
+            logging.getLogger("app.config").warning(
+                "No email provider configured (set MAILJET_API_KEY, "
+                "MAILJET_API_SECRET and MAILJET_FROM_EMAIL, or the SMTP_* "
+                "variables). Invite emails will only be written to the log."
+            )
+        elif self.mailjet_configured and self.MAILJET_SANDBOX:
+            import logging
+
+            logging.getLogger("app.config").warning(
+                "MAILJET_SANDBOX is on: Mailjet will validate messages but "
+                "deliver nothing. Unset it to send real invites."
             )
         return self
 

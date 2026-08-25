@@ -1,4 +1,5 @@
-from pydantic import BaseModel, EmailStr, model_validator
+from pydantic import BaseModel, EmailStr, Field, model_validator
+from app.schemas.teacher import TeacherInviteEntry
 from app.services.s3_service import sign_url
 # Rest of file imports...
 from datetime import datetime
@@ -10,6 +11,9 @@ class SchoolCreate(BaseModel):
     # School admin is created invited (no password) and accepts via emailed link.
     admin_name: str
     admin_email: EmailStr
+    # Optional staff list so an organisation can be stood up in a single step.
+    # Each teacher is invited by email exactly like the admin.
+    teachers: list[TeacherInviteEntry] = Field(default_factory=list, max_length=200)
 
 
 class SchoolRegisterRequest(BaseModel):

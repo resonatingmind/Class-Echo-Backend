@@ -72,9 +72,7 @@ from app.services.planner_assignment_service import (
     replace_assignment,
 )
 from app.services import teacher_onboarding_service as onboarding
-from app.core.security import generate_token_pair
-from app.models.auth_token import AuthToken
-from app.tasks.email_tasks import send_email_task
+from app.services import invite_service
 from app.config import settings
 
 from fastapi.responses import StreamingResponse
@@ -318,32 +316,25 @@ async def invite_teacher(
 
     await db.flush()
 
-    raw_token, token_hash = generate_token_pair()
-    db.add(
-        AuthToken(
-            user_type="teacher",
-            user_id=teacher.id,
-            token_hash=token_hash,
-            purpose="invite",
-            expires_at=datetime.utcnow() + timedelta(days=7),
-        )
-    )
+    raw_token = await invite_service.issue_invite_token(db, "teacher", teacher.id)
     await db.commit()
     await db.refresh(teacher)
-
-    invite_link = f"{settings.FRONTEND_URL}/accept-invite?token={raw_token}"
-    send_email_task.delay(
-        teacher.email,
-        "You've been invited to Class Echo",
-        f"<p>Hi {teacher.name},</p><p>You've been invited to join Class Echo as a "
-        f"teacher. Set your password to get started: "
-        f"<a href='{invite_link}'>{invite_link}</a></p>",
-    )
 
     result = await db.execute(
         select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher.id)
     )
-    return _teacher_admin_out(result.scalar_one())
+    teacher = result.scalar_one()
+
+    invite_service.queue_invite_email(
+        to_email=teacher.email,
+        to_name=teacher.name,
+        organisation_name=teacher.school.name if teacher.school else "Class Echo",
+        role_label="teacher",
+        raw_token=raw_token,
+        inviter_name=school_admin.name,
+    )
+
+    return _teacher_admin_out(teacher)
 
 
 @router.post("/teachers/{teacher_id}/approve", response_model=TeacherOut)
