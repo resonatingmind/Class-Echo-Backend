@@ -25,6 +25,9 @@ class EmailStatusOut(BaseModel):
     sandbox: bool
     frontend_url: str
     sample_invite_link: str
+    # Redacted identity of the API credentials actually loaded on this
+    # deployment, so "I set the key" can be checked against what is in use.
+    credentials: str | None = None
     warnings: list[str]
 
 
@@ -48,6 +51,7 @@ class EmailTestResult(BaseModel):
     # The provider's own words on failure — an unverified From address and a
     # bad API key are both "no email arrived" from the outside.
     error: str | None = None
+    credentials: str | None = None
     detail: str
 
 

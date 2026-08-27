@@ -13,7 +13,7 @@ from app.models.auth_token import AuthToken
 from app.models.school import School
 from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
-from app.services import invite_service
+from app.services import email_service, invite_service
 from app.services import teacher_onboarding_service as onboarding
 from app.models.class_ import Class
 from app.models.subject import Subject
@@ -94,6 +94,7 @@ async def get_email_status(_=Depends(get_admin)):
         sandbox=settings.MAILJET_SANDBOX,
         frontend_url=settings.FRONTEND_URL,
         sample_invite_link=invite_service.invite_link("EXAMPLE-TOKEN"),
+        credentials=email_service.credential_fingerprint(),
         warnings=warnings,
     )
 
@@ -112,6 +113,7 @@ async def send_test_email(
     from app.services.email_service import send_email
 
     backend = settings.email_backend
+    credentials = email_service.credential_fingerprint()
 
     if backend == "log":
         return EmailTestResult(
@@ -139,13 +141,29 @@ async def send_test_email(
             "invitations sent from this deployment will arrive too.</p>",
         )
     except Exception as exc:
+        message = str(exc)
+        if "API key" in message or "key/secret" in message:
+            # A 401 says only that the pair is wrong, never how. These are the
+            # three ways it actually happens, in the order they happen.
+            detail = (
+                "Mailjet rejected these credentials. Compare the fingerprint "
+                "above against your Mailjet account (Account settings → API "
+                "Key Management): a real key and secret are 32 characters "
+                "each. Check for a truncated paste, the key and secret filled "
+                "in the wrong way round, or a value from a different Mailjet "
+                "sub-account. Note that variables added on the host only take "
+                "effect after a redeploy."
+            )
+        else:
+            detail = f"{backend} refused the message. Its own error is above."
         return EmailTestResult(
             delivered=False,
             backend=backend,
             to_email=body.to_email,
             from_email=from_email,
-            error=str(exc),
-            detail=f"{backend} refused the message. Its own error is above.",
+            error=message,
+            credentials=credentials,
+            detail=detail,
         )
 
     if backend == "mailjet" and settings.MAILJET_SANDBOX:
@@ -156,6 +174,7 @@ async def send_test_email(
             backend=backend,
             to_email=body.to_email,
             from_email=from_email,
+            credentials=credentials,
             error="MAILJET_SANDBOX is enabled.",
             detail=(
                 "Mailjet accepted and validated the message but delivered "
@@ -169,6 +188,7 @@ async def send_test_email(
         backend=backend,
         to_email=body.to_email,
         from_email=from_email,
+        credentials=credentials,
         detail=(
             f"{backend} accepted the message for {body.to_email}. If it does "
             "not arrive within a few minutes, check the spam folder and the "

@@ -44,6 +44,34 @@ def send_email(to_email: str, subject: str, html_body: str, to_name: str | None 
     logger.info("[email:dev-fallback] to=%s subject=%r\n%s", to_email, subject, html_body)
 
 
+def credential_fingerprint() -> str | None:
+    """Identify the Mailjet credentials in use without revealing them.
+
+    "I already set the key" and "the key Mailjet is rejecting" are different
+    claims, and nothing in a 401 tells them apart. Length plus the first and
+    last four characters is enough to spot the three ways this actually goes
+    wrong — a truncated paste, the key and secret swapped, or a stale value on
+    the deployment — while staying useless to anyone who reads it.
+    """
+    if not settings.mailjet_configured:
+        return None
+
+    def redact(label: str, value: str | None) -> str:
+        if not value:
+            return f"{label}: missing"
+        if len(value) < 12:
+            # Too short to show any of: whatever this is, it is not a real key.
+            return f"{label}: len={len(value)} (too short to be valid)"
+        return f"{label}: len={len(value)} {value[:4]}…{value[-4:]}"
+
+    return "  ".join(
+        (
+            redact("key", settings.MAILJET_API_KEY),
+            redact("secret", settings.MAILJET_API_SECRET),
+        )
+    )
+
+
 # ── Choosing between the worker and an inline send ───────────────────────────
 
 _WORKER_PROBE_TTL_SECONDS = 60
