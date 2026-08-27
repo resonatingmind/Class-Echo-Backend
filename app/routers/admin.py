@@ -146,13 +146,13 @@ async def send_test_email(
             # A 401 says only that the pair is wrong, never how. These are the
             # three ways it actually happens, in the order they happen.
             detail = (
-                "Mailjet rejected these credentials. Compare the fingerprint "
-                "above against your Mailjet account (Account settings → API "
-                "Key Management): a real key and secret are 32 characters "
-                "each. Check for a truncated paste, the key and secret filled "
-                "in the wrong way round, or a value from a different Mailjet "
-                "sub-account. Note that variables added on the host only take "
-                "effect after a redeploy."
+                "Mailjet rejected these credentials. Compare the key/secret "
+                "fingerprint shown below against your Mailjet account "
+                "(Account settings → API Key Management): a real key and "
+                "secret are 32 characters each. Check for a truncated paste, "
+                "the key and secret filled in the wrong way round, or a value "
+                "from a different Mailjet sub-account. Note that variables "
+                "added on the host only take effect after a redeploy."
             )
         else:
             detail = f"{backend} refused the message. Its own error is above."
