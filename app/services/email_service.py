@@ -1,5 +1,6 @@
 import logging
 import smtplib
+import time
 from email.mime.text import MIMEText
 
 import httpx
@@ -41,6 +42,86 @@ def send_email(to_email: str, subject: str, html_body: str, to_name: str | None 
         return
 
     logger.info("[email:dev-fallback] to=%s subject=%r\n%s", to_email, subject, html_body)
+
+
+# ── Choosing between the worker and an inline send ───────────────────────────
+
+_WORKER_PROBE_TTL_SECONDS = 60
+# (checked_at_monotonic, worker_was_listening)
+_worker_probe: tuple[float, bool] | None = None
+
+
+def _celery_worker_listening() -> bool:
+    """Is a worker actually consuming, or is the broker merely reachable?
+
+    `.delay()` returns happily as long as Redis accepts the message, so a
+    deployment running the API without its Celery worker queues every invite
+    into a list nobody reads and reports success for all of them. That is the
+    one email failure with no error anywhere — in the API log, the worker log or
+    the provider dashboard. One ping a minute buys the difference.
+    """
+    global _worker_probe
+
+    now = time.monotonic()
+    if _worker_probe is not None and now - _worker_probe[0] < _WORKER_PROBE_TTL_SECONDS:
+        return _worker_probe[1]
+
+    try:
+        from celery_worker import celery_app
+
+        listening = bool(celery_app.control.ping(timeout=1.0))
+    except Exception:
+        logger.warning(
+            "Could not probe for a Celery worker; sending email inline instead",
+            exc_info=True,
+        )
+        listening = False
+
+    if not listening:
+        logger.warning(
+            "No Celery worker answered: email will be sent inline on the web "
+            "process. Start the worker (celery -A celery_worker.celery_app "
+            "worker) so delivery does not block API requests."
+        )
+
+    _worker_probe = (now, listening)
+    return listening
+
+
+def deliver_email(
+    to_email: str, subject: str, html_body: str, to_name: str | None = None
+) -> str:
+    """Get an email out by whichever route is actually working.
+
+    Prefers the Celery worker so a slow provider cannot stall an API request,
+    but falls back to sending inline rather than queuing into the void. Returns
+    "queued", "sent" or "failed" — never raises, because every caller has
+    already committed the account row the email is about, and a 500 at that
+    point would report failure for work that succeeded.
+    """
+    if _celery_worker_listening():
+        try:
+            from app.tasks.email_tasks import send_email_task
+
+            send_email_task.delay(to_email, subject, html_body, to_name)
+            return "queued"
+        except Exception:
+            logger.warning(
+                "Handing the email for %s to Celery failed; sending inline",
+                to_email,
+                exc_info=True,
+            )
+
+    try:
+        send_email(to_email, subject, html_body, to_name)
+        return "sent"
+    except Exception:
+        logger.exception(
+            "Email to %s could not be delivered. Check /admin/system/email-test "
+            "for the provider's own error, then resend.",
+            to_email,
+        )
+        return "failed"
 
 
 def _send_via_mailjet(to_email: str, subject: str, html_body: str, to_name: str | None) -> None:

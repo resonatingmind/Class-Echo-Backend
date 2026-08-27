@@ -5,14 +5,19 @@ set -euo pipefail
 # Without this, alembic/seed can race a not-yet-ready Postgres container
 # and fail silently (start.sh had no `set -e`), leaving the app serving
 # against an empty, unmigrated database.
+#
+# Probes the same URL alembic will use (MIGRATION_DATABASE_URL when set), not
+# DATABASE_URL — on Supabase those are different ports, and a reachable
+# transaction pooler says nothing about the session pooler migrations need.
 python - <<'PY'
-import os
 import sys
 import time
 
 import psycopg2
 
-url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+from app.config import settings
+
+url = settings.sync_migration_url
 
 for attempt in range(30):
     try:

@@ -2,12 +2,12 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.core.deps import get_admin
-from app.core.security import verify_password
+from app.core.security import hash_password, verify_password
 from app.config import settings
 from app.models.auth_token import AuthToken
 from app.models.school import School
@@ -27,7 +27,14 @@ from app.schemas.school import (
     SchoolRejectRequest,
     SchoolDeleteRequest,
 )
-from app.schemas.admin import AdminProfileOut
+from app.schemas.admin import (
+    AdminProfileOut,
+    CredentialUpdateOut,
+    EmailStatusOut,
+    EmailTestRequest,
+    EmailTestResult,
+    SetPasswordRequest,
+)
 from app.schemas.teacher import (
     TeacherBulkInviteRequest,
     TeacherBulkInviteResponse,
@@ -46,6 +53,128 @@ router = APIRouter()
 @router.get("/me", response_model=AdminProfileOut)
 async def get_my_profile(admin=Depends(get_admin)):
     return admin
+
+
+@router.get("/system/email-status", response_model=EmailStatusOut)
+async def get_email_status(_=Depends(get_admin)):
+    """Report whether this deployment can actually deliver invitations.
+
+    An invite that is only written to the log looks identical to a delivered one
+    from the UI, so this makes the difference visible without shell access to
+    the server.
+    """
+    backend = settings.email_backend
+    warnings: list[str] = []
+
+    if backend == "log":
+        warnings.append(
+            "No email provider configured, so invitations are only written to "
+            "the server log and never delivered. Set MAILJET_API_KEY, "
+            "MAILJET_API_SECRET and MAILJET_FROM_EMAIL on this deployment."
+        )
+    if backend == "mailjet" and settings.MAILJET_SANDBOX:
+        warnings.append(
+            "MAILJET_SANDBOX is enabled: Mailjet validates messages but "
+            "delivers nothing. Correct for staging, wrong for production."
+        )
+    if "localhost" in settings.FRONTEND_URL or "127.0.0.1" in settings.FRONTEND_URL:
+        warnings.append(
+            f"FRONTEND_URL is {settings.FRONTEND_URL!r}, so emailed invite links "
+            "point at the server's own machine and will not open for recipients. "
+            "Set it to the public URL of the app."
+        )
+
+    return EmailStatusOut(
+        backend=backend,
+        delivers_email=backend != "log",
+        from_email=(
+            settings.MAILJET_FROM_EMAIL if backend == "mailjet" else settings.SMTP_FROM_EMAIL
+        ),
+        from_name=settings.MAILJET_FROM_NAME if backend == "mailjet" else None,
+        sandbox=settings.MAILJET_SANDBOX,
+        frontend_url=settings.FRONTEND_URL,
+        sample_invite_link=invite_service.invite_link("EXAMPLE-TOKEN"),
+        warnings=warnings,
+    )
+
+
+@router.post("/system/email-test", response_model=EmailTestResult)
+async def send_test_email(
+    body: EmailTestRequest,
+    _=Depends(get_admin),
+):
+    """Send a real email now and report exactly what the provider said.
+
+    Deliberately bypasses Celery and sends on this request: routing it through
+    the worker would put any error in a log the person debugging cannot see,
+    which is the situation this endpoint exists to escape.
+    """
+    from app.services.email_service import send_email
+
+    backend = settings.email_backend
+
+    if backend == "log":
+        return EmailTestResult(
+            delivered=False,
+            backend=backend,
+            to_email=body.to_email,
+            from_email=None,
+            error="No email provider is configured.",
+            detail=(
+                "This deployment has no MAILJET_* or SMTP_* variables set, so "
+                "every message is written to the server log and nothing is "
+                "delivered. Nothing was sent."
+            ),
+        )
+
+    from_email = (
+        settings.MAILJET_FROM_EMAIL if backend == "mailjet" else settings.SMTP_FROM_EMAIL
+    )
+
+    try:
+        send_email(
+            body.to_email,
+            "Class Echo test email",
+            "<p>This is a test message from Class Echo. If you can read it, "
+            "invitations sent from this deployment will arrive too.</p>",
+        )
+    except Exception as exc:
+        return EmailTestResult(
+            delivered=False,
+            backend=backend,
+            to_email=body.to_email,
+            from_email=from_email,
+            error=str(exc),
+            detail=f"{backend} refused the message. Its own error is above.",
+        )
+
+    if backend == "mailjet" and settings.MAILJET_SANDBOX:
+        # Mailjet accepts and validates the message, then throws it away, so a
+        # clean success here still means no email arrives.
+        return EmailTestResult(
+            delivered=False,
+            backend=backend,
+            to_email=body.to_email,
+            from_email=from_email,
+            error="MAILJET_SANDBOX is enabled.",
+            detail=(
+                "Mailjet accepted and validated the message but delivered "
+                "nothing, which is what sandbox mode does. Set "
+                "MAILJET_SANDBOX=false to send for real."
+            ),
+        )
+
+    return EmailTestResult(
+        delivered=True,
+        backend=backend,
+        to_email=body.to_email,
+        from_email=from_email,
+        detail=(
+            f"{backend} accepted the message for {body.to_email}. If it does "
+            "not arrive within a few minutes, check the spam folder and the "
+            f"provider's own event log for {from_email}."
+        ),
+    )
 
 
 @router.get("/schools", response_model=list[SchoolOut])
@@ -538,6 +667,182 @@ async def revoke_teacher_invite(
     )
     await db.delete(teacher)
     await db.commit()
+
+
+# ── Direct credential management ─────────────────────────────────────────────
+#
+# The invite flow assumes a reachable inbox: the account is created without a
+# password and only becomes usable once the emailed link is clicked. That falls
+# apart when email is unconfigured on the deployment, the address bounces, or
+# the admin is onboarding someone sitting next to them. These endpoints let the
+# super admin set a password and activate an account directly, so nobody stays
+# stranded behind an email that never arrives.
+
+
+async def _set_user_password(
+    db: AsyncSession,
+    *,
+    user: SchoolAdmin | Teacher,
+    user_type: str,
+    admin,
+    body: SetPasswordRequest,
+) -> CredentialUpdateOut:
+    if not verify_password(body.admin_password, admin.hashed_password):
+        raise HTTPException(status_code=403, detail="Incorrect password")
+
+    was_active = user.status == "active"
+    user.hashed_password = hash_password(body.new_password)
+
+    if body.activate:
+        user.status = "active"
+        user.rejected_reason = None
+        # A password handed over by the super admin is at least as strong a
+        # proof of ownership as clicking a link in the inbox would have been.
+        user.email_verified = True
+        if user.approved_at is None:
+            user.approved_at = datetime.utcnow()
+            if user_type == "school_admin":
+                user.approved_by_admin_id = admin.id
+
+    # An invite or verification link still sitting in an inbox would let whoever
+    # holds it overwrite the password that was just set, so burn them.
+    await db.execute(
+        update(AuthToken)
+        .where(
+            AuthToken.user_type == user_type,
+            AuthToken.user_id == user.id,
+            AuthToken.purpose.in_(("invite", "email_verification")),
+            AuthToken.used_at.is_(None),
+        )
+        .values(used_at=datetime.utcnow())
+    )
+    await db.commit()
+    await db.refresh(user)
+
+    activated = body.activate and not was_active
+    return CredentialUpdateOut(
+        user_type=user_type,
+        user_id=user.id,
+        name=user.name,
+        email=user.email,
+        status=user.status,
+        activated=activated,
+        detail=(
+            f"Password set for {user.email}."
+            + (" The account is now active." if activated else "")
+        ),
+    )
+
+
+@router.post("/schools/{school_id}/admin/set-password", response_model=CredentialUpdateOut)
+async def set_school_admin_password(
+    school_id: int,
+    body: SetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    """Set or reset a school admin's password without sending any email."""
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    return await _set_user_password(
+        db, user=school_admin, user_type="school_admin", admin=admin, body=body
+    )
+
+
+@router.post(
+    "/schools/{school_id}/teachers/{teacher_id}/set-password",
+    response_model=CredentialUpdateOut,
+)
+async def set_teacher_password(
+    school_id: int,
+    teacher_id: int,
+    body: SetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    """Set or reset a teacher's password without sending any email."""
+    teacher = await _get_school_teacher(teacher_id, school_id, db)
+    return await _set_user_password(
+        db, user=teacher, user_type="teacher", admin=admin, body=body
+    )
+
+
+@router.post("/schools/{school_id}/admin/activate", response_model=SchoolOut)
+async def activate_school_admin(
+    school_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    """Activate a school admin from any state, bypassing the emailed invite.
+
+    Unlike approve/reactivate this does not care which state the account starts
+    in, which is the point: a rejected or stalled admin can be waved through
+    once the super admin has verified them out of band.
+    """
+    school_admin = await _get_school_admin_for_school(school_id, db)
+    _require_password_set(school_admin, "school admin")
+
+    if school_admin.status != "active":
+        school_admin.status = "active"
+        school_admin.rejected_reason = None
+        if school_admin.approved_at is None:
+            school_admin.approved_at = datetime.utcnow()
+            school_admin.approved_by_admin_id = admin.id
+    school_admin.email_verified = True
+    await db.commit()
+    return await _get_school_with_admin(school_id, db)
+
+
+@router.post(
+    "/schools/{school_id}/teachers/{teacher_id}/activate", response_model=TeacherOut
+)
+async def activate_teacher(
+    school_id: int,
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Activate a teacher from any state, bypassing the emailed invite."""
+    teacher = await _get_school_teacher(teacher_id, school_id, db)
+    _require_password_set(teacher, "teacher")
+
+    if teacher.status != "active":
+        teacher.status = "active"
+        teacher.rejected_reason = None
+        if teacher.approved_at is None:
+            teacher.approved_at = datetime.utcnow()
+    teacher.email_verified = True
+    await db.commit()
+
+    result = await db.execute(
+        select(Teacher).options(selectinload(Teacher.school)).where(Teacher.id == teacher.id)
+    )
+    return _teacher_out(result.scalar_one())
+
+
+def _require_password_set(user: SchoolAdmin | Teacher, role_label: str) -> None:
+    """Activating an account with no password would create a dead end.
+
+    It cannot be logged into, and once active it no longer looks like it is
+    waiting for anything, so the problem stops being visible from the UI.
+    """
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This {role_label} has no password yet. Set one first, or "
+                "resend their invitation."
+            ),
+        )
+
+
+async def _get_school_teacher(teacher_id: int, school_id: int, db: AsyncSession) -> Teacher:
+    result = await db.execute(
+        select(Teacher).where(Teacher.id == teacher_id, Teacher.school_id == school_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found in this organisation")
+    return teacher
 
 
 def _teacher_out(t: Teacher) -> TeacherOut:

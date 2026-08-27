@@ -1,4 +1,3 @@
-import os
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
@@ -14,12 +13,16 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override sqlalchemy.url from env (sync driver for migrations)
-db_url = os.environ.get("DATABASE_URL", "")
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-# asyncpg -> psycopg2 for alembic sync migrations
-sync_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+# Override sqlalchemy.url from env (sync driver for migrations).
+#
+# settings.sync_migration_url prefers MIGRATION_DATABASE_URL over DATABASE_URL
+# and converts asyncpg -> psycopg2. On Supabase the two differ: the app runs
+# over the transaction pooler (6543), but DDL and the alembic_version lock need
+# the session pooler (5432), where a migration keeps one backend for its whole
+# transaction.
+from app.config import settings  # noqa: E402
+
+sync_url = settings.sync_migration_url
 config.set_main_option("sqlalchemy.url", sync_url)
 
 target_metadata = Base.metadata

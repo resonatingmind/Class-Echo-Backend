@@ -6,6 +6,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str
+    # Optional separate URL for Alembic/DDL. Needed on Supabase: the runtime app
+    # can talk to the transaction pooler (port 6543), but DDL and Alembic's
+    # version-table locking are only reliable over the session pooler
+    # (port 5432) or a direct connection. Falls back to DATABASE_URL.
+    MIGRATION_DATABASE_URL: str | None = None
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     # Default 90 days (set ACCESS_TOKEN_EXPIRE_MINUTES in env to override).
@@ -53,10 +58,16 @@ class Settings(BaseSettings):
     SMTP_USER: str | None = None
     SMTP_PASSWORD: str | None = None
     SMTP_FROM_EMAIL: str = "no-reply@classecho.app"
-    FRONTEND_URL: str = "http://localhost:5173"
+    # Defaults to production on purpose. This value is baked into emailed
+    # invite and verification links, so a deployment that forgets to set it
+    # sends links nobody can open — and the failure is invisible until a
+    # recipient complains. A dev who gets a production link in their own inbox
+    # is a far cheaper mistake, and local runs set this in .env anyway.
+    FRONTEND_URL: str = "https://class-echo-frontend.vercel.app"
 
     @field_validator(
         "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
         "SECRET_KEY",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -93,6 +104,37 @@ class Settings(BaseSettings):
                 cleaned = cleaned[:-1].strip()
             return cleaned
         return value
+
+    @property
+    def sync_migration_url(self) -> str:
+        """
+        Sync (psycopg2) URL for Alembic and the start-up readiness probe.
+
+        Prefers MIGRATION_DATABASE_URL so the app can run over Supabase's
+        transaction pooler while DDL goes through the session pooler.
+        """
+        url = self.MIGRATION_DATABASE_URL or self.DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    @property
+    def db_is_local(self) -> bool:
+        """
+        True only when the database host cannot be a managed/remote Postgres.
+        reset_db.py uses this to refuse to wipe Supabase.
+        """
+        host = (urlparse(self.sync_migration_url).hostname or "").lower()
+        return host in {
+            "",
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "host.docker.internal",
+            # docker-compose service names
+            "postgres",
+            "db",
+        }
 
     @property
     def mailjet_configured(self) -> bool:

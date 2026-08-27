@@ -21,12 +21,14 @@ import asyncio
 import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import app.models  # noqa: F401 — registers all ORM models with SQLAlchemy
+from app.config import settings
 from app.core.security import hash_password
 from app.database import AsyncSessionLocal, engine
 from app.models.admin import Admin
@@ -51,6 +53,48 @@ TRUNCATE_ORDER = [
     "schools",
     "admins",
 ]
+
+
+ALLOW_REMOTE_WIPE_ENV = "ALLOW_REMOTE_DB_WIPE"
+
+
+def assert_wipe_allowed() -> None:
+    """
+    Refuse to run against a non-local database unless explicitly overridden.
+
+    start.sh invokes this script with --yes whenever ENVIRONMENT=test or
+    RESET_DB_ON_STARTUP=true, so a stray env var on a hosted deploy would drop
+    the entire schema on every boot -- silently, since --yes skips the prompt.
+    That is survivable against a throwaway container and unrecoverable against
+    a managed database like Supabase, which is why the host is checked here
+    rather than trusted to the caller.
+    """
+    if settings.db_is_local:
+        return
+
+    host = urlparse(settings.sync_migration_url).hostname or "<unknown>"
+
+    if os.environ.get(ALLOW_REMOTE_WIPE_ENV, "").lower() in {"1", "true", "yes"}:
+        print(f"  [!] {ALLOW_REMOTE_WIPE_ENV} is set — wiping REMOTE host {host}")
+        return
+
+    print()
+    print("=" * 60)
+    print("  REFUSING TO WIPE A REMOTE DATABASE")
+    print("=" * 60)
+    print(f"  Host: {host}")
+    print()
+    print("  This is not a local database, and reset_db.py drops the entire")
+    print("  public schema. Nothing here is recoverable.")
+    print()
+    print("  If you genuinely intend to wipe this database, re-run with:")
+    print(f"      {ALLOW_REMOTE_WIPE_ENV}=true python reset_db.py --yes")
+    print()
+    print("  If you did NOT expect this to run, check ENVIRONMENT and")
+    print("  RESET_DB_ON_STARTUP in your deploy environment — start.sh calls")
+    print("  this script automatically when either is set.")
+    print("=" * 60)
+    sys.exit(1)
 
 
 async def truncate_all_tables():
@@ -93,6 +137,8 @@ async def main(name: str, email: str, password: str):
     print("=" * 60)
     print()
 
+    assert_wipe_allowed()
+
     print("Step 1: Truncating all tables ...")
     await truncate_all_tables()
 
@@ -132,6 +178,7 @@ if __name__ == "__main__":
     if not args.yes:
         print()
         print("⚠️  WARNING: This will DELETE ALL DATA in the database!")
+        print(f"   Host     : {urlparse(settings.sync_migration_url).hostname}")
         print(f"   Email    : {args.email}")
         print(f"   Name     : {args.name}")
         confirm = input("   Type 'yes' to continue: ").strip().lower()

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.security import generate_token_pair
 from app.models.auth_token import AuthToken
-from app.tasks.email_tasks import send_email_task
+from app.services.email_service import deliver_email
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +66,21 @@ def queue_invite_email(
     raw_token: str,
     inviter_name: str | None = None,
 ) -> None:
-    """Hand the invite email to Celery.
+    """Build the invitation and get it delivered.
 
-    Queued rather than sent inline so a slow or down provider cannot make the
-    invite endpoint time out after the account row was already committed.
+    Prefers the Celery worker so a slow or down provider cannot make the invite
+    endpoint time out after the account row was already committed.
     """
+    # Without this, a deployment missing its email credentials reports a
+    # successful invite while the message only ever reaches the log.
+    if settings.email_backend == "log":
+        logger.warning(
+            "No email provider is configured: the invitation for %s was NOT "
+            "delivered. Set the MAILJET_* (or SMTP_*) variables on this "
+            "deployment and resend the invitation.",
+            to_email,
+        )
+
     link = invite_link(raw_token)
     subject = f"You've been invited to {organisation_name} on Class Echo"
     html = _invite_html(
@@ -80,25 +90,16 @@ def queue_invite_email(
         link=link,
         inviter_name=inviter_name,
     )
-    try:
-        send_email_task.delay(to_email, subject, html, to_name)
-    except Exception:
-        # The account row is already committed at this point. If the broker is
-        # unreachable, sending inline is far better than 500-ing back to the
-        # admin and leaving an invited account nobody was told about.
+    # deliver_email picks the worker or an inline send and swallows failures:
+    # the account row is already committed, so 500-ing here would report failure
+    # for an invitation that was in fact created.
+    outcome = deliver_email(to_email, subject, html, to_name)
+    if outcome == "failed":
         logger.warning(
-            'Celery unavailable; sending invite to %s inline', to_email, exc_info=True
+            "Invite email to %s was not delivered. Resend it from the "
+            "organisation screen, or set their password directly.",
+            to_email,
         )
-        from app.services.email_service import send_email
-
-        try:
-            send_email(to_email, subject, html, to_name)
-        except Exception:
-            logger.exception(
-                'Invite email to %s could not be delivered. Resend it from the '
-                'organisation screen once email is reachable.',
-                to_email,
-            )
 
 
 def _invite_html(
