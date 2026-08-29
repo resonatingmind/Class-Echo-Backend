@@ -35,10 +35,11 @@ from app.models.chapter_knowledge import ChapterKnowledge
 from app.models.timetable_entry import TimetableEntry
 from app.models.learning_plan import LearningPlan
 from app.models.auth_token import AuthToken
+from app.models.email_log import EmailLog, EmailStatus
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
     "Teacher", "Student", "Recording", "RecordingStatus", "LLMReport",
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
-    "TimetableEntry", "LearningPlan", "AuthToken",
+    "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
 ]

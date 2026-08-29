@@ -65,6 +65,9 @@ def queue_invite_email(
     role_label: str,
     raw_token: str,
     inviter_name: str | None = None,
+    school_id: int | None = None,
+    related_type: str | None = None,
+    related_id: int | None = None,
 ) -> None:
     """Build the invitation and get it delivered.
 
@@ -93,7 +96,16 @@ def queue_invite_email(
     # deliver_email picks the worker or an inline send and swallows failures:
     # the account row is already committed, so 500-ing here would report failure
     # for an invitation that was in fact created.
-    outcome = deliver_email(to_email, subject, html, to_name)
+    outcome = deliver_email(
+        to_email,
+        subject,
+        html,
+        to_name,
+        purpose="invite",
+        school_id=school_id,
+        related_type=related_type,
+        related_id=related_id,
+    )
     if outcome == "failed":
         logger.warning(
             "Invite email to %s was not delivered. Resend it from the "

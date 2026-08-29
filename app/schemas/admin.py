@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -80,3 +82,90 @@ class CredentialUpdateOut(BaseModel):
     status: str
     activated: bool
     detail: str
+
+
+# ── Operations: email log ────────────────────────────────────────────────────
+
+
+class EmailLogEntry(BaseModel):
+    """One recorded send attempt.
+
+    Carries no message body by design — see the EmailLog model for why — so the
+    UI resends by re-minting a token rather than replaying a stored link.
+    """
+
+    id: int
+    to_email: str
+    subject: str
+    purpose: str
+    status: str
+    backend: str | None
+    error: str | None
+    school_id: int | None
+    related_type: str | None
+    related_id: int | None
+    created_at: datetime
+    updated_at: datetime | None
+    # False when nothing here identifies an account to re-invite (a test send,
+    # or a row from before the account was deleted), so the UI can grey the
+    # button out instead of offering an action that will 400.
+    can_resend: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EmailStatsOut(BaseModel):
+    """Today's delivery totals, and how close they are to the provider's cap.
+
+    The cap matters on SMTP: Gmail cuts a sender off for ~24h once the daily
+    recipient count is passed, which during a bulk invite is a failure you want
+    to see coming rather than discover afterwards.
+    """
+
+    sent_today: int
+    failed_today: int
+    skipped_today: int
+    queued_now: int
+    backend: str
+    provider_daily_cap: int | None
+    cap_note: str | None
+
+
+# ── Operations: recording pipeline ───────────────────────────────────────────
+
+
+class PipelineRecordingOut(BaseModel):
+    """A recording as the operations screen needs it: what broke, and whose."""
+
+    id: int
+    status: str
+    error_reason: str | None
+    lecture_title: str | None
+    chapter_name: str | None
+    teacher_name: str | None
+    subject_name: str | None
+    school_id: int | None
+    school_name: str | None
+    uploaded_at: datetime
+    processed_at: datetime | None
+    # How long it has been sitting in its current state. A "processing" job that
+    # is 4 minutes old is working; one that is 90 minutes old is dead.
+    minutes_in_state: float
+
+
+# ── System health ────────────────────────────────────────────────────────────
+
+
+class HealthComponent(BaseModel):
+    key: str
+    label: str
+    status: str  # ok | warn | error
+    detail: str
+
+
+class SystemHealthOut(BaseModel):
+    """Every dependency an operator would otherwise SSH in to check."""
+
+    healthy: bool
+    components: list[HealthComponent]
+    checked_at: datetime

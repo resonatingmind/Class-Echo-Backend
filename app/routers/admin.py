@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
@@ -20,6 +20,8 @@ from app.models.subject import Subject
 from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
+from app.models.email_log import EmailLog, EmailStatus
+from app.models.recording import RecordingStatus
 from app.schemas.school import (
     SchoolCreate,
     SchoolUpdate,
@@ -30,10 +32,15 @@ from app.schemas.school import (
 from app.schemas.admin import (
     AdminProfileOut,
     CredentialUpdateOut,
+    EmailLogEntry,
+    EmailStatsOut,
     EmailStatusOut,
     EmailTestRequest,
     EmailTestResult,
+    HealthComponent,
+    PipelineRecordingOut,
     SetPasswordRequest,
+    SystemHealthOut,
 )
 from app.schemas.teacher import (
     TeacherBulkInviteRequest,
@@ -133,6 +140,19 @@ async def send_test_email(
         settings.MAILJET_FROM_EMAIL if backend == "mailjet" else settings.SMTP_FROM_EMAIL
     )
 
+    # Recorded like any other message so the operations log shows the test runs
+    # interleaved with the real invitations — which is the comparison you
+    # actually want when only some of them are arriving.
+    from app.models.email_log import EmailStatus as _EmailStatus
+    from app.services import email_log_service
+
+    log_id = email_log_service.record(
+        to_email=body.to_email,
+        subject="Class Echo test email",
+        purpose="test",
+        backend=backend,
+    )
+
     try:
         send_email(
             body.to_email,
@@ -142,6 +162,7 @@ async def send_test_email(
         )
     except Exception as exc:
         message = str(exc)
+        email_log_service.mark(log_id, _EmailStatus.failed, message)
         if "mj-0001" in message or "temporarily blocked" in message.lower():
             # Not a credential fault at all: the key authenticates, the account
             # is barred from sending. Mailjet holds new accounts for a
@@ -181,7 +202,9 @@ async def send_test_email(
 
     if backend == "mailjet" and settings.MAILJET_SANDBOX:
         # Mailjet accepts and validates the message, then throws it away, so a
-        # clean success here still means no email arrives.
+        # clean success here still means no email arrives. "skipped" is the same
+        # verdict the log gives an unconfigured deployment, for the same reason.
+        email_log_service.mark(log_id, _EmailStatus.skipped)
         return EmailTestResult(
             delivered=False,
             backend=backend,
@@ -196,6 +219,7 @@ async def send_test_email(
             ),
         )
 
+    email_log_service.mark(log_id, _EmailStatus.sent)
     return EmailTestResult(
         delivered=True,
         backend=backend,
@@ -207,6 +231,440 @@ async def send_test_email(
             "not arrive within a few minutes, check the spam folder and the "
             f"provider's own event log for {from_email}."
         ),
+    )
+
+
+# ── Operations & system diagnostics ──────────────────────────────────────────
+
+# Gmail stops accepting mail from a sender for ~24h past this many recipients.
+# Workspace accounts get 2000, but assuming the lower number is the safe
+# direction to be wrong in: warning early costs nothing, warning late costs a
+# day of invitations.
+GMAIL_DAILY_CAP = 500
+# A job still "processing" after this long is not slow, it is dead — the worker
+# holding it died mid-task, so nothing will ever come back to mark it failed.
+STUCK_PROCESSING_MINUTES = 30
+
+
+def _status_value(value) -> str:
+    """Enum columns arrive as the enum from the ORM and a str from raw SQL."""
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _can_resend(row: EmailLog) -> bool:
+    """Only invitations can be re-sent, and only if we still know whose.
+
+    Verification mails have no resend endpoint and test sends have no account
+    behind them, so offering the button for either would produce a 400 on click.
+    """
+    return bool(
+        row.purpose == "invite" and row.school_id and row.related_type and row.related_id
+    )
+
+
+def _email_log_entry(row: EmailLog) -> EmailLogEntry:
+    return EmailLogEntry(
+        id=row.id,
+        to_email=row.to_email,
+        subject=row.subject,
+        purpose=row.purpose,
+        status=_status_value(row.status),
+        backend=row.backend,
+        error=row.error,
+        school_id=row.school_id,
+        related_type=row.related_type,
+        related_id=row.related_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        can_resend=_can_resend(row),
+    )
+
+
+@router.get("/system/email-log", response_model=list[EmailLogEntry])
+async def list_email_log(
+    status: str | None = Query(None, description="queued|sent|failed|skipped"),
+    purpose: str | None = Query(None, description="invite|verification|test"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Every send attempt, newest first.
+
+    This is the answer to "the teacher says no invitation arrived", which until
+    now could only be investigated by reading server logs - assuming the process
+    that wrote them was still alive to be read.
+    """
+    query = select(EmailLog).order_by(EmailLog.created_at.desc())
+
+    if status:
+        try:
+            query = query.where(EmailLog.status == EmailStatus(status))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown status {status!r}")
+    if purpose:
+        query = query.where(EmailLog.purpose == purpose)
+
+    result = await db.execute(query.limit(limit).offset(offset))
+    return [_email_log_entry(row) for row in result.scalars().all()]
+
+
+@router.get("/system/email-stats", response_model=EmailStatsOut)
+async def get_email_stats(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Delivery totals for the last 24 hours, against the provider's cap.
+
+    A rolling window rather than a calendar day because that is how Gmail
+    measures it, and being wrong about the boundary is how you get cut off
+    halfway through inviting a school.
+    """
+    since = datetime.utcnow() - timedelta(hours=24)
+    result = await db.execute(
+        select(EmailLog.status, func.count())
+        .where(EmailLog.created_at >= since)
+        .group_by(EmailLog.status)
+    )
+    counts = {_status_value(status): total for status, total in result.all()}
+
+    backend = settings.email_backend
+    cap = None
+    cap_note = None
+    if backend == "smtp" and "gmail" in (settings.SMTP_HOST or "").lower():
+        cap = GMAIL_DAILY_CAP
+        cap_note = (
+            "Gmail counts recipients, not messages, over a rolling 24 hours. "
+            "Past the cap it refuses everything from this sender for about a "
+            "day, and the retries will exhaust themselves against it."
+        )
+    elif backend == "log":
+        cap_note = (
+            "No provider is configured, so these were written to the server log "
+            "and never sent."
+        )
+
+    return EmailStatsOut(
+        sent_today=counts.get("sent", 0),
+        failed_today=counts.get("failed", 0),
+        skipped_today=counts.get("skipped", 0),
+        queued_now=counts.get("queued", 0),
+        backend=backend,
+        provider_daily_cap=cap,
+        cap_note=cap_note,
+    )
+
+
+@router.post("/system/email-log/{log_id}/resend", status_code=202)
+async def resend_from_email_log(
+    log_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_admin),
+):
+    """Re-send the invitation a log row refers to.
+
+    Mints a brand new token through the normal resend path rather than replaying
+    whatever went out the first time. That is not only caution about storing live
+    tokens: issue_invite_token burns the previous token on every re-issue, so a
+    replayed link would already be dead.
+    """
+    row = await db.get(EmailLog, log_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No such email log entry")
+    if not _can_resend(row):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only invitations can be re-sent from here, and this row does "
+                "not identify an account to re-invite."
+            ),
+        )
+
+    if row.related_type == "school_admin":
+        return await resend_school_admin_invite(row.school_id, db, admin)
+    if row.related_type == "teacher":
+        return await resend_teacher_invite(row.school_id, row.related_id, db, admin)
+
+    raise HTTPException(
+        status_code=400, detail=f"Cannot resend a {row.related_type!r} invitation"
+    )
+
+
+@router.get("/system/recordings", response_model=list[PipelineRecordingOut])
+async def list_pipeline_recordings(
+    status: str | None = Query(None, description="pending|processing|completed|failed"),
+    problems_only: bool = Query(True),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Recordings the analysis pipeline has failed or abandoned.
+
+    The data was always here - status and error_reason are columns on the table
+    - there was simply no way to see it without a database client.
+    """
+    stuck_before = datetime.utcnow() - timedelta(minutes=STUCK_PROCESSING_MINUTES)
+
+    query = (
+        select(Recording)
+        .options(
+            selectinload(Recording.teacher).selectinload(Teacher.school),
+            selectinload(Recording.subject),
+        )
+        .order_by(Recording.uploaded_at.desc())
+    )
+
+    if status:
+        try:
+            query = query.where(Recording.status == RecordingStatus(status))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown status {status!r}")
+    elif problems_only:
+        # Failed jobs, plus anything that entered the pipeline and never came
+        # back out. The second half is the one nobody notices, because a job
+        # nothing is working on raises no error anywhere.
+        query = query.where(
+            or_(
+                Recording.status == RecordingStatus.failed,
+                and_(
+                    Recording.status.in_(
+                        [RecordingStatus.pending, RecordingStatus.processing]
+                    ),
+                    Recording.uploaded_at < stuck_before,
+                ),
+            )
+        )
+
+    result = await db.execute(query.limit(limit))
+    now = datetime.utcnow()
+
+    out: list[PipelineRecordingOut] = []
+    for rec in result.scalars().all():
+        teacher = rec.teacher
+        school = teacher.school if teacher else None
+        since = rec.processed_at or rec.uploaded_at
+        out.append(
+            PipelineRecordingOut(
+                id=rec.id,
+                status=_status_value(rec.status),
+                error_reason=rec.error_reason,
+                lecture_title=rec.lecture_title,
+                chapter_name=rec.chapter_name,
+                teacher_name=teacher.name if teacher else None,
+                subject_name=rec.subject.name if rec.subject else None,
+                school_id=school.id if school else None,
+                school_name=school.name if school else None,
+                uploaded_at=rec.uploaded_at,
+                processed_at=rec.processed_at,
+                minutes_in_state=round((now - since).total_seconds() / 60, 1),
+            )
+        )
+    return out
+
+
+@router.post("/system/recordings/{recording_id}/retry", status_code=202)
+async def retry_recording(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Put a failed or stuck recording back through analysis.
+
+    Refuses when no worker is listening rather than calling .delay() anyway.
+    Queuing into a broker nobody is reading is what produces a stuck job in the
+    first place, and doing it from the screen built to clear stuck jobs would be
+    a remarkable way to make the problem worse.
+    """
+    recording = await db.get(Recording, recording_id)
+    if not recording:
+        raise HTTPException(status_code=404, detail="No such recording")
+
+    if not email_service.worker_is_listening():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No Celery worker is listening, so a retry would sit in the "
+                "queue unread. Start the worker (celery -A celery_worker."
+                "celery_app worker) and try again."
+            ),
+        )
+
+    recording.status = RecordingStatus.pending
+    recording.error_reason = None
+    recording.processed_at = None
+    await db.commit()
+
+    from app.tasks.llm_tasks import process_recording
+
+    process_recording.delay(recording.id, recording.cloudinary_url)
+    return {"detail": f"Recording {recording.id} has been queued for reanalysis."}
+
+
+@router.get("/system/health", response_model=SystemHealthOut)
+async def get_system_health(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Every dependency an operator would otherwise need a shell to check.
+
+    Each component reports ok / warn / error, where warn means "running, but
+    configured in a way that loses data or mail". A deployment can be entirely
+    green on uptime checks while dropping every invitation it is handed.
+    """
+    components: list[HealthComponent] = []
+
+    try:
+        await db.execute(select(1))
+        components.append(
+            HealthComponent(
+                key="database",
+                label="Database",
+                status="ok",
+                detail="Reachable and accepting queries.",
+            )
+        )
+    except Exception as exc:
+        components.append(
+            HealthComponent(
+                key="database", label="Database", status="error", detail=str(exc)[:300]
+            )
+        )
+
+    # Broker and worker are reported separately on purpose: Redis being healthy
+    # is exactly what makes a missing worker invisible, because .delay() returns
+    # successfully either way.
+    queue_depth: int | None = None
+    try:
+        import redis
+
+        client = redis.from_url(settings.REDIS_URL, socket_timeout=2)
+        client.ping()
+        queue_depth = client.llen("celery")
+        components.append(
+            HealthComponent(
+                key="redis",
+                label="Redis (broker)",
+                status="ok",
+                detail=f"Reachable. {queue_depth} task(s) waiting in the queue.",
+            )
+        )
+    except Exception as exc:
+        components.append(
+            HealthComponent(
+                key="redis",
+                label="Redis (broker)",
+                status="error",
+                detail=(
+                    f"Unreachable: {str(exc)[:200]}. Recordings and emails "
+                    "cannot be queued."
+                ),
+            )
+        )
+
+    if email_service.worker_is_listening():
+        detail = "At least one worker answered."
+        if queue_depth:
+            detail += f" {queue_depth} task(s) still waiting."
+        components.append(
+            HealthComponent(
+                key="celery", label="Background worker", status="ok", detail=detail
+            )
+        )
+    else:
+        components.append(
+            HealthComponent(
+                key="celery",
+                label="Background worker",
+                status="error",
+                detail=(
+                    "No worker answered. Recording analysis will not run, and "
+                    "email falls back to sending inline on the web process."
+                ),
+            )
+        )
+
+    email_backend = settings.email_backend
+    if email_backend == "log":
+        components.append(
+            HealthComponent(
+                key="email",
+                label="Email",
+                status="error",
+                detail=(
+                    "No provider configured. Invitations are written to the "
+                    "server log and never delivered."
+                ),
+            )
+        )
+    elif email_backend == "mailjet" and settings.MAILJET_SANDBOX:
+        components.append(
+            HealthComponent(
+                key="email",
+                label="Email",
+                status="warn",
+                detail="Mailjet sandbox is on: messages validate but never arrive.",
+            )
+        )
+    else:
+        components.append(
+            HealthComponent(
+                key="email",
+                label="Email",
+                status="ok",
+                detail=f"Sending via {email_backend}.",
+            )
+        )
+
+    storage = settings.storage_backend
+    components.append(
+        HealthComponent(
+            key="storage",
+            label="File storage",
+            status="ok" if storage != "local" else "error",
+            detail=(
+                f"Uploads go to {storage}."
+                if storage != "local"
+                else (
+                    "Uploads are written to ./uploads on the web container, "
+                    "which is wiped on every redeploy and invisible to the worker."
+                )
+            ),
+        )
+    )
+
+    components.append(
+        HealthComponent(
+            key="gemini",
+            label="AI (Gemini)",
+            status="ok" if settings.GEMINI_API_KEY else "error",
+            detail=(
+                "API key present."
+                if settings.GEMINI_API_KEY
+                else "GEMINI_API_KEY is unset, so recording analysis cannot run."
+            ),
+        )
+    )
+
+    frontend_url = settings.FRONTEND_URL
+    local_frontend = "localhost" in frontend_url or "127.0.0.1" in frontend_url
+    components.append(
+        HealthComponent(
+            key="frontend_url",
+            label="Invite link target",
+            status="warn" if local_frontend else "ok",
+            detail=(
+                f"FRONTEND_URL is {frontend_url}, so emailed links point at the "
+                "server's own machine and will not open for recipients."
+                if local_frontend
+                else f"Links are built against {frontend_url}."
+            ),
+        )
+    )
+
+    return SystemHealthOut(
+        healthy=all(c.status == "ok" for c in components),
+        components=components,
+        checked_at=datetime.utcnow(),
     )
 
 
@@ -293,6 +751,9 @@ async def create_school(
         role_label="school admin",
         raw_token=admin_token,
         inviter_name=admin.name,
+        school_id=school.id,
+        related_type="school_admin",
+        related_id=school_admin.id,
     )
     for teacher, token in teacher_invites:
         invite_service.queue_invite_email(
@@ -302,6 +763,9 @@ async def create_school(
             role_label="teacher",
             raw_token=token,
             inviter_name=admin.name,
+            school_id=school.id,
+            related_type="teacher",
+            related_id=teacher.id,
         )
 
     result = await db.execute(
@@ -596,6 +1060,9 @@ async def invite_school_teachers(
             role_label="teacher",
             raw_token=token,
             inviter_name=admin.name,
+            school_id=school.id,
+            related_type="teacher",
+            related_id=teacher.id,
         )
 
     return TeacherBulkInviteResponse(
@@ -630,6 +1097,9 @@ async def resend_school_admin_invite(
         role_label="school admin",
         raw_token=token,
         inviter_name=admin.name,
+        school_id=school.id,
+        related_type="school_admin",
+        related_id=school_admin.id,
     )
     return {"detail": f"Invitation resent to {school_admin.email}"}
 
@@ -665,6 +1135,9 @@ async def resend_teacher_invite(
         role_label="teacher",
         raw_token=token,
         inviter_name=admin.name,
+        school_id=school.id,
+        related_type="teacher",
+        related_id=teacher.id,
     )
     return {"detail": f"Invitation resent to {teacher.email}"}
 

@@ -213,6 +213,10 @@ async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depe
             f"<p>Hi {teacher.name},</p><p>Verify your email by clicking "
             f"<a href='{verify_link}'>this link</a>. This is optional and won't "
             f"block your access.</p>",
+            purpose="verification",
+            school_id=teacher.school_id,
+            related_type="teacher",
+            related_id=teacher.id,
         )
 
     token = create_access_token({"sub": str(teacher.id), "role": "teacher"})
@@ -263,6 +267,10 @@ async def school_register(body: SchoolRegisterRequest, db: AsyncSession = Depend
         f"<p>Hi {school_admin.name},</p><p>Verify your email by clicking "
         f"<a href='{verify_link}'>this link</a>. This is optional and won't "
         f"block your access.</p>",
+        purpose="verification",
+        school_id=school.id,
+        related_type="school_admin",
+        related_id=school_admin.id,
     )
 
     token = create_access_token({"sub": str(school_admin.id), "role": "school_admin"})

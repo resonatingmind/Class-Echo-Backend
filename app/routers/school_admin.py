@@ -332,6 +332,9 @@ async def invite_teacher(
         role_label="teacher",
         raw_token=raw_token,
         inviter_name=school_admin.name,
+        school_id=teacher.school_id,
+        related_type="teacher",
+        related_id=teacher.id,
     )
 
     return _teacher_admin_out(teacher)

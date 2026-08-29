@@ -122,8 +122,26 @@ def _celery_worker_listening() -> bool:
     return listening
 
 
+def worker_is_listening() -> bool:
+    """Public read of the worker probe, for callers outside this module.
+
+    The admin health screen and the recording retry both need the same answer,
+    and both would otherwise reach into _celery_worker_listening past the
+    underscore that says not to.
+    """
+    return _celery_worker_listening()
+
+
 def deliver_email(
-    to_email: str, subject: str, html_body: str, to_name: str | None = None
+    to_email: str,
+    subject: str,
+    html_body: str,
+    to_name: str | None = None,
+    *,
+    purpose: str = "general",
+    school_id: int | None = None,
+    related_type: str | None = None,
+    related_id: int | None = None,
 ) -> str:
     """Get an email out by whichever route is actually working.
 
@@ -132,12 +150,32 @@ def deliver_email(
     "queued", "sent" or "failed" — never raises, because every caller has
     already committed the account row the email is about, and a 500 at that
     point would report failure for work that succeeded.
+
+    The purpose/school_id/related_* arguments are what make the row readable
+    later: "failed" on its own tells you something broke, not whose invitation
+    it was or which button re-sends it.
     """
+    from app.models.email_log import EmailStatus
+    from app.services import email_log_service
+
+    backend = settings.email_backend
+    # Opened before the send so the worker has a row to close, and so a message
+    # that kills the process still leaves a trace of having been attempted.
+    log_id = email_log_service.record(
+        to_email=to_email,
+        subject=subject,
+        purpose=purpose,
+        backend=backend,
+        school_id=school_id,
+        related_type=related_type,
+        related_id=related_id,
+    )
+
     if _celery_worker_listening():
         try:
             from app.tasks.email_tasks import send_email_task
 
-            send_email_task.delay(to_email, subject, html_body, to_name)
+            send_email_task.delay(to_email, subject, html_body, to_name, log_id)
             return "queued"
         except Exception:
             logger.warning(
@@ -148,8 +186,16 @@ def deliver_email(
 
     try:
         send_email(to_email, subject, html_body, to_name)
+        # "log" backend means send_email printed it and nothing was delivered.
+        # Recording that as sent would launder the one failure this whole table
+        # exists to expose.
+        email_log_service.mark(
+            log_id,
+            EmailStatus.skipped if backend == "log" else EmailStatus.sent,
+        )
         return "sent"
-    except Exception:
+    except Exception as exc:
+        email_log_service.mark(log_id, EmailStatus.failed, str(exc))
         logger.exception(
             "Email to %s could not be delivered. Check /admin/system/email-test "
             "for the provider's own error, then resend.",
