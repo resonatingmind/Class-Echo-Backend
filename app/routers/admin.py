@@ -142,7 +142,20 @@ async def send_test_email(
         )
     except Exception as exc:
         message = str(exc)
-        if "API key" in message or "key/secret" in message:
+        if "mj-0001" in message or "temporarily blocked" in message.lower():
+            # Not a credential fault at all: the key authenticates, the account
+            # is barred from sending. Mailjet holds new accounts for a
+            # compliance review, so this is the expected first-week failure and
+            # no amount of re-pasting the key will clear it.
+            detail = (
+                "Mailjet authenticated the key but has blocked this account "
+                "from sending, which it reports as a 401. The credentials are "
+                "not the problem — re-pasting them will not help. Contact "
+                "Mailjet support (Account settings shows the same notice) to "
+                "get the account reviewed and unblocked. Until then, clear the "
+                "MAILJET_* variables to fall back to logging invite links."
+            )
+        elif "401" in message or "API key" in message or "key/secret" in message:
             # A 401 says only that the pair is wrong, never how. These are the
             # three ways it actually happens, in the order they happen.
             detail = (

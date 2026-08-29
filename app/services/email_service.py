@@ -13,6 +13,12 @@ MAILJET_SEND_URL = "https://api.mailjet.com/v3.1/send"
 # Mailjet occasionally takes a few seconds under load; the caller is a Celery
 # task with retries, so failing fast is better than holding a worker slot.
 MAILJET_TIMEOUT_SECONDS = 15.0
+# smtplib defaults to the global socket timeout, which is None: without this a
+# stalled connection to the mail host hangs the Celery worker forever. It never
+# raises, so send_email_task's retries never fire either and the invite simply
+# stops existing — the same invisible failure the worker probe above guards
+# against, one layer down. 30s covers Gmail's slowest observed handshake.
+SMTP_TIMEOUT_SECONDS = 30.0
 
 
 class EmailDeliveryError(RuntimeError):
@@ -185,9 +191,14 @@ def _send_via_mailjet(to_email: str, subject: str, html_body: str, to_name: str 
         raise EmailDeliveryError(f"Could not reach Mailjet: {exc}") from exc
 
     if response.status_code == 401:
+        # A 401 here is not only "wrong key pair". Mailjet also returns it for a
+        # blocked or not-yet-validated account (ErrorCode mj-0001), which needs a
+        # support ticket rather than a new key — and the read endpoints keep
+        # answering 200 the whole time, so the credentials look fine everywhere
+        # you would think to check. Its own body is the only thing that tells the
+        # two apart, so carry it through instead of asserting a credential fault.
         raise EmailDeliveryError(
-            "Mailjet rejected the API key/secret. Check MAILJET_API_KEY and "
-            "MAILJET_API_SECRET."
+            f"Mailjet rejected the send with 401: {response.text[:500]}"
         )
     if response.status_code >= 400:
         raise EmailDeliveryError(
@@ -215,12 +226,17 @@ def _send_via_smtp(to_email: str, subject: str, html_body: str) -> None:
     message["To"] = to_email
 
     try:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+        with smtplib.SMTP(
+            settings.SMTP_HOST, settings.SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS
+        ) as server:
             server.starttls()
             if settings.SMTP_USER and settings.SMTP_PASSWORD:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             server.sendmail(settings.SMTP_FROM_EMAIL, [to_email], message.as_string())
-    except smtplib.SMTPException as exc:
+    # OSError covers the timeout above and a refused/dropped connection, neither
+    # of which is an SMTPException — without it those escape as bare socket
+    # errors and lose the "which email, which transport" framing.
+    except (smtplib.SMTPException, OSError) as exc:
         raise EmailDeliveryError(f"SMTP delivery failed: {exc}") from exc
 
     logger.info("[email:smtp] sent to=%s subject=%r", to_email, subject)
