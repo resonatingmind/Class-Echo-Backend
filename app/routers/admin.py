@@ -24,6 +24,10 @@ from app.models.student import Student
 from app.models.recording import Recording
 from app.models.llm_report import LLMReport
 from app.models.audit_log import AuditLog
+from app.models.chapter import Chapter
+from app.models.chapter_chunk import ChapterChunk
+from app.models.chapter_document import ChapterDocument
+from app.models.timetable_entry import TimetableEntry
 from app.models.email_log import EmailLog, EmailStatus
 from app.models.recording import RecordingStatus
 from app.schemas.school import (
@@ -1382,15 +1386,43 @@ async def delete_school(
     if not school:
         raise HTTPException(status_code=404, detail="School not found")
 
+    # Every table below is wired with ON DELETE NO ACTION, so the order here is
+    # not cosmetic: each row has to go before whatever it points at. Deleting a
+    # school used to fail outright because chapters, timetable entries and
+    # teachers were never cleared and still referenced the rows being removed.
     class_ids = select(Class.id).where(Class.school_id == school_id)
     subject_ids = select(Subject.id).where(Subject.class_id.in_(class_ids))
-    recording_ids = select(Recording.id).where(Recording.subject_id.in_(subject_ids))
+    chapter_ids = select(Chapter.id).where(Chapter.subject_id.in_(subject_ids))
+    teacher_ids = select(Teacher.id).where(Teacher.school_id == school_id)
+    # A recording is reachable either through the school's subjects or through
+    # one of its teachers; both have to go before subjects and teachers do.
+    recording_ids = select(Recording.id).where(
+        or_(
+            Recording.subject_id.in_(subject_ids),
+            Recording.teacher_id.in_(teacher_ids),
+        )
+    )
 
     await db.execute(
         delete(LLMReport).where(LLMReport.recording_id.in_(recording_ids))
     )
     await db.execute(
         delete(Recording).where(Recording.id.in_(recording_ids))
+    )
+    # chapter_knowledge and learning_plans cascade from chapters; chunks and
+    # documents do not, so they are cleared explicitly first.
+    await db.execute(
+        delete(ChapterChunk).where(ChapterChunk.chapter_id.in_(chapter_ids))
+    )
+    await db.execute(
+        delete(ChapterDocument).where(ChapterDocument.chapter_id.in_(chapter_ids))
+    )
+    await db.execute(
+        delete(Chapter).where(Chapter.id.in_(chapter_ids))
+    )
+    # Points at class, subject and teacher at once, so it goes before all three.
+    await db.execute(
+        delete(TimetableEntry).where(TimetableEntry.school_id == school_id)
     )
     await db.execute(
         delete(Subject).where(Subject.id.in_(subject_ids))
@@ -1400,6 +1432,30 @@ async def delete_school(
     )
     await db.execute(
         delete(Class).where(Class.school_id == school_id)
+    )
+    # Invite and verification tokens are addressed by (user_type, user_id) with
+    # no foreign key, so they outlive the accounts unless cleared here - and an
+    # unredeemed invite for a deleted teacher would still activate whatever
+    # account later takes that id. Must run while those ids still resolve.
+    school_admin_ids = select(SchoolAdmin.id).where(SchoolAdmin.school_id == school_id)
+    await db.execute(
+        delete(AuthToken).where(
+            or_(
+                and_(
+                    AuthToken.user_type == "teacher",
+                    AuthToken.user_id.in_(teacher_ids),
+                ),
+                and_(
+                    AuthToken.user_type == "school_admin",
+                    AuthToken.user_id.in_(school_admin_ids),
+                ),
+            )
+        )
+    )
+    # Teachers carry approved_by / invited_by references to school admins, so
+    # they have to be removed before the admins that invited them.
+    await db.execute(
+        delete(Teacher).where(Teacher.school_id == school_id)
     )
     await db.execute(
         delete(SchoolAdmin).where(SchoolAdmin.school_id == school_id)
