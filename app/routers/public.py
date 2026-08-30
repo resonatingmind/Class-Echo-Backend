@@ -52,3 +52,25 @@ async def download_subject_learning_plan_template():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=subject_planner_template.xlsx"},
     )
+
+
+@router.get("/system/status")
+async def public_system_status():
+    """Whether the app is in maintenance, for the banner every client shows.
+
+    Unauthenticated on purpose: the people who most need to see this notice are
+    the ones whose requests are being refused, and a logged-out user staring at
+    a login form deserves to know why it will not work either.
+    """
+    from app.services import settings_service
+
+    try:
+        maintenance = bool(settings_service.get("maintenance_mode"))
+        message = str(settings_service.get("maintenance_message"))
+    except Exception:
+        maintenance, message = False, ""
+
+    return {
+        "maintenance_mode": maintenance,
+        "maintenance_message": message if maintenance else "",
+    }

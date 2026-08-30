@@ -2,12 +2,21 @@ import logging
 import smtplib
 import time
 from email.mime.text import MIMEText
+from email.utils import formataddr
 
 import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+RESEND_SEND_URL = "https://api.resend.com/emails"
+RESEND_TIMEOUT_SECONDS = 15.0
+
+BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
+# Same reasoning as the Mailjet timeout below, and the same reason both are
+# HTTPS rather than SMTP: port 443 is the one port a PaaS never blocks.
+BREVO_TIMEOUT_SECONDS = 15.0
 
 MAILJET_SEND_URL = "https://api.mailjet.com/v3.1/send"
 # Mailjet occasionally takes a few seconds under load; the caller is a Celery
@@ -32,12 +41,31 @@ class EmailDeliveryError(RuntimeError):
 def send_email(to_email: str, subject: str, html_body: str, to_name: str | None = None) -> None:
     """Send an email through whichever backend is configured.
 
-    Mailjet wins when its API keys are present, SMTP is the fallback, and with
-    neither configured the message is logged instead. The log fallback keeps
-    onboarding fully testable locally: the invite link is right there in the
-    server output.
+    Brevo wins when its key is present, then Mailjet, then SMTP, and with none
+    configured the message is logged instead. The log fallback keeps onboarding
+    fully testable locally: the invite link is right there in the server output.
     """
+    if email_is_paused():
+        # Deliberately not an exception: pausing is an operator decision, not a
+        # failure, and raising here would make deliver_email record every held
+        # message as "failed" and Celery retry it three times.
+        logger.info(
+            "[email:paused] held to=%s subject=%r (outgoing email is paused in "
+            "the admin panel)",
+            to_email,
+            subject,
+        )
+        return
+
     backend = settings.email_backend
+
+    if backend == "resend":
+        _send_via_resend(to_email, subject, html_body, to_name)
+        return
+
+    if backend == "brevo":
+        _send_via_brevo(to_email, subject, html_body, to_name)
+        return
 
     if backend == "mailjet":
         _send_via_mailjet(to_email, subject, html_body, to_name)
@@ -51,16 +79,14 @@ def send_email(to_email: str, subject: str, html_body: str, to_name: str | None 
 
 
 def credential_fingerprint() -> str | None:
-    """Identify the Mailjet credentials in use without revealing them.
+    """Identify the API credentials in use without revealing them.
 
-    "I already set the key" and "the key Mailjet is rejecting" are different
-    claims, and nothing in a 401 tells them apart. Length plus the first and
-    last four characters is enough to spot the three ways this actually goes
-    wrong — a truncated paste, the key and secret swapped, or a stale value on
-    the deployment — while staying useless to anyone who reads it.
+    "I already set the key" and "the key the provider is rejecting" are
+    different claims, and nothing in a 401 tells them apart. Length plus the
+    first and last four characters is enough to spot the ways this actually goes
+    wrong — a truncated paste, two values swapped, or a stale one on the
+    deployment — while staying useless to anyone who reads it.
     """
-    if not settings.mailjet_configured:
-        return None
 
     def redact(label: str, value: str | None) -> str:
         if not value:
@@ -70,12 +96,30 @@ def credential_fingerprint() -> str | None:
             return f"{label}: len={len(value)} (too short to be valid)"
         return f"{label}: len={len(value)} {value[:4]}…{value[-4:]}"
 
-    return "  ".join(
-        (
-            redact("key", settings.MAILJET_API_KEY),
-            redact("secret", settings.MAILJET_API_SECRET),
+    backend = settings.email_backend
+
+    if backend == "resend":
+        key = settings.RESEND_API_KEY or ""
+        shape = "" if key.startswith("re_") else "  (expected an re_ prefix)"
+        return f"{redact('key', key)}{shape}"
+
+    if backend == "brevo":
+        key = settings.BREVO_API_KEY or ""
+        # Every Brevo API key is prefixed xkeysib-. Its absence almost always
+        # means an SMTP-relay password was pasted into the API key field, which
+        # the dashboard puts one tab away from the right one.
+        shape = "" if key.startswith("xkeysib-") else "  (expected an xkeysib- prefix)"
+        return f"{redact('key', key)}{shape}"
+
+    if backend == "mailjet":
+        return "  ".join(
+            (
+                redact("key", settings.MAILJET_API_KEY),
+                redact("secret", settings.MAILJET_API_SECRET),
+            )
         )
-    )
+
+    return None
 
 
 # ── Choosing between the worker and an inline send ───────────────────────────
@@ -120,6 +164,31 @@ def _celery_worker_listening() -> bool:
 
     _worker_probe = (now, listening)
     return listening
+
+
+def email_is_paused() -> bool:
+    """Has an operator switched outgoing mail off in the admin panel?
+
+    Defaults to False on any failure. A settings lookup that cannot reach the
+    database must not silently stop every invitation.
+    """
+    from app.services import settings_service
+
+    try:
+        return bool(settings_service.get("email_paused"))
+    except Exception:
+        logger.warning("Could not read the email_paused setting", exc_info=True)
+        return False
+
+
+def sender_display_name() -> str:
+    """The name recipients see, overridable at runtime."""
+    from app.services import settings_service
+
+    try:
+        return str(settings_service.get("email_from_name"))
+    except Exception:
+        return settings.sender_name_default
 
 
 def worker_is_listening() -> bool:
@@ -186,12 +255,15 @@ def deliver_email(
 
     try:
         send_email(to_email, subject, html_body, to_name)
-        # "log" backend means send_email printed it and nothing was delivered.
-        # Recording that as sent would launder the one failure this whole table
-        # exists to expose.
+        # Two ways send_email returns without delivering anything: no provider
+        # configured, or an operator has paused outgoing mail. Recording either
+        # as "sent" would launder exactly the failure this table exists to
+        # expose. email_is_paused is cached, so asking twice costs nothing.
         email_log_service.mark(
             log_id,
-            EmailStatus.skipped if backend == "log" else EmailStatus.sent,
+            EmailStatus.sent
+            if backend != "log" and not email_is_paused()
+            else EmailStatus.skipped,
         )
         return "sent"
     except Exception as exc:
@@ -204,13 +276,92 @@ def deliver_email(
         return "failed"
 
 
+def _send_via_resend(to_email: str, subject: str, html_body: str, to_name: str | None) -> None:
+    payload = {
+        # Resend takes the sender as a single RFC 5322 string rather than a
+        # name/email pair. formataddr quotes the display name when it needs it,
+        # which a bare f-string would not — a comma in the name would otherwise
+        # split it into two addresses and the send would 422.
+        "from": formataddr((sender_display_name(), settings.RESEND_FROM_EMAIL or "")),
+        "to": [to_email],
+        "subject": subject,
+        "html": html_body,
+        "text": _html_to_text(html_body),
+    }
+
+    try:
+        response = httpx.post(
+            RESEND_SEND_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {settings.RESEND_API_KEY or ''}"},
+            timeout=RESEND_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise EmailDeliveryError(f"Could not reach Resend: {exc}") from exc
+
+    if response.status_code not in (200, 201, 202):
+        # Resend's body carries `name` and `message`. Unlike Brevo and Mailjet
+        # it has no account-activation state to get stuck behind: the failures
+        # worth naming are a bad key (401) and an unverified sending domain
+        # (403), both of which the message states plainly. Pass it through.
+        raise EmailDeliveryError(
+            f"Resend rejected the send with {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
+    logger.info("[email:resend] sent to=%s subject=%r", to_email, subject)
+
+
+def _send_via_brevo(to_email: str, subject: str, html_body: str, to_name: str | None) -> None:
+    payload = {
+        "sender": {
+            "email": settings.BREVO_FROM_EMAIL,
+            "name": sender_display_name(),
+        },
+        "to": [{"email": to_email, "name": to_name or to_email}],
+        "subject": subject,
+        "htmlContent": html_body,
+        # Brevo accepts HTML alone, but a message with no text alternative
+        # scores worse with every major spam filter.
+        "textContent": _html_to_text(html_body),
+    }
+
+    try:
+        response = httpx.post(
+            BREVO_SEND_URL,
+            json=payload,
+            headers={
+                "api-key": settings.BREVO_API_KEY or "",
+                "accept": "application/json",
+            },
+            timeout=BREVO_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise EmailDeliveryError(f"Could not reach Brevo: {exc}") from exc
+
+    # 201 is the success code for an immediate send; 202 is a scheduled one,
+    # which we never ask for but is not an error if it ever comes back.
+    if response.status_code not in (200, 201, 202):
+        # Brevo's body carries a machine-readable `code` alongside the message,
+        # and the codes mean genuinely different things: unauthorized is a bad
+        # key, permission_denied is an unverified sender or a restricted key,
+        # and account-level holds arrive as their own message. Passing the body
+        # through verbatim is what let the Mailjet block get diagnosed at all.
+        raise EmailDeliveryError(
+            f"Brevo rejected the send with {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
+    logger.info("[email:brevo] sent to=%s subject=%r", to_email, subject)
+
+
 def _send_via_mailjet(to_email: str, subject: str, html_body: str, to_name: str | None) -> None:
     payload = {
         "Messages": [
             {
                 "From": {
                     "Email": settings.MAILJET_FROM_EMAIL,
-                    "Name": settings.MAILJET_FROM_NAME,
+                    "Name": sender_display_name(),
                 },
                 "To": [{"Email": to_email, "Name": to_name or to_email}],
                 "Subject": subject,
@@ -268,7 +419,10 @@ def _send_via_mailjet(to_email: str, subject: str, html_body: str, to_name: str 
 def _send_via_smtp(to_email: str, subject: str, html_body: str) -> None:
     message = MIMEText(html_body, "html")
     message["Subject"] = subject
-    message["From"] = settings.SMTP_FROM_EMAIL
+    # A display name rather than the bare address: invitations from a personal
+    # gmail.com address read as a stranger's mail, which is most of the battle
+    # with a recipient deciding whether to trust the link inside.
+    message["From"] = formataddr((sender_display_name(), settings.SMTP_FROM_EMAIL))
     message["To"] = to_email
 
     try:

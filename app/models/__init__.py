@@ -36,10 +36,13 @@ from app.models.timetable_entry import TimetableEntry
 from app.models.learning_plan import LearningPlan
 from app.models.auth_token import AuthToken
 from app.models.email_log import EmailLog, EmailStatus
+from app.models.system_setting import SystemSetting
+from app.models.audit_log import AuditLog
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
     "Teacher", "Student", "Recording", "RecordingStatus", "LLMReport",
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
     "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
+    "SystemSetting", "AuditLog",
 ]

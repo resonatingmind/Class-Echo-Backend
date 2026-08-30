@@ -39,10 +39,32 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str | None = None
     ADMIN_PASSWORD: str | None = None
 
-    # Email (invite / verification links). Mailjet is preferred; SMTP is the
-    # fallback; with neither configured email_service logs the message instead
-    # of sending — a safe default for local dev.
+    # Email (invite / verification links). Providers are tried in the order
+    # Resend -> Brevo -> Mailjet -> SMTP, and with none configured email_service
+    # logs the message instead of sending — a safe default for local dev.
     #
+    # The two API providers come first because they are the only ones that work
+    # on a host with outbound SMTP blocked (Render's free tier null-routes ports
+    # 25, 465 and 587): their APIs are ordinary HTTPS on 443.
+    #
+    # Resend is first because it is the only one of the four that a new account
+    # can start sending on without waiting for a human review — verifying the
+    # domain is the whole approval process. RESEND_FROM_EMAIL must be on a
+    # domain verified under Domains; Resend refuses anything else outright
+    # rather than accepting the call and dropping the message.
+    RESEND_API_KEY: str | None = None
+    RESEND_FROM_EMAIL: str | None = None
+
+    # BREVO_FROM_EMAIL must be verified under Senders, Domains & Dedicated IPs ->
+    # Senders. Brevo accepts the API call for an unverified sender and then
+    # fails the message, which looks identical to a delivery problem.
+    BREVO_API_KEY: str | None = None
+    BREVO_FROM_EMAIL: str | None = None
+
+    # Provider-neutral display name. MAILJET_FROM_NAME is kept as the fallback
+    # so existing deployments do not lose their sender name on upgrade.
+    EMAIL_FROM_NAME: str | None = None
+
     # MAILJET_FROM_EMAIL must be an address verified in the Mailjet dashboard
     # (Account Settings -> Sender domains & addresses), otherwise Mailjet accepts
     # the API call and then fails the message with "sender address not allowed".
@@ -83,6 +105,11 @@ class Settings(BaseSettings):
         "ADMIN_NAME",
         "ADMIN_EMAIL",
         "ADMIN_PASSWORD",
+        "RESEND_API_KEY",
+        "RESEND_FROM_EMAIL",
+        "BREVO_API_KEY",
+        "BREVO_FROM_EMAIL",
+        "EMAIL_FROM_NAME",
         "MAILJET_API_KEY",
         "MAILJET_API_SECRET",
         "MAILJET_FROM_EMAIL",
@@ -143,13 +170,55 @@ class Settings(BaseSettings):
         )
 
     @property
+    def brevo_configured(self) -> bool:
+        return bool(self.BREVO_API_KEY and self.BREVO_FROM_EMAIL)
+
+    @property
+    def resend_configured(self) -> bool:
+        return bool(self.RESEND_API_KEY and self.RESEND_FROM_EMAIL)
+
+    @property
     def email_backend(self) -> str:
-        """Which transport send_email() uses: mailjet, smtp, or log-only."""
+        """Which transport send_email() uses: resend, brevo, mailjet, smtp, log.
+
+        First match wins, so configuring a new provider is enough to switch —
+        but the loser stays silently loaded, which is its own trap. Clear the
+        variables of any provider you are not using; the admin health screen
+        warns whenever more than one is set.
+        """
+        if self.resend_configured:
+            return "resend"
+        if self.brevo_configured:
+            return "brevo"
         if self.mailjet_configured:
             return "mailjet"
         if self.SMTP_HOST:
             return "smtp"
         return "log"
+
+    @property
+    def sender_email(self) -> str | None:
+        """The From address for whichever provider is active.
+
+        Centralised because every caller that needed it was re-deriving the
+        same ternary, and each new provider silently broke the ones that were
+        not updated.
+        """
+        backend = self.email_backend
+        if backend == "resend":
+            return self.RESEND_FROM_EMAIL
+        if backend == "brevo":
+            return self.BREVO_FROM_EMAIL
+        if backend == "mailjet":
+            return self.MAILJET_FROM_EMAIL
+        if backend == "smtp":
+            return self.SMTP_FROM_EMAIL
+        return None
+
+    @property
+    def sender_name_default(self) -> str:
+        """Env-level sender name, before any runtime override."""
+        return self.EMAIL_FROM_NAME or self.MAILJET_FROM_NAME
 
     @property
     def cloudinary_configured(self) -> bool:

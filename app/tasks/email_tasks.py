@@ -16,7 +16,7 @@ def send_email_task(
     from app.config import settings
     from app.models.email_log import EmailStatus
     from app.services import email_log_service
-    from app.services.email_service import send_email
+    from app.services.email_service import email_is_paused, send_email
 
     try:
         send_email(to_email, subject, html_body, to_name)
@@ -32,8 +32,12 @@ def send_email_task(
         raise self.retry(exc=exc, countdown=countdown)
 
     # A later retry succeeding has to clear the earlier failure, or the log
-    # keeps accusing a message that did in fact arrive.
+    # keeps accusing a message that did in fact arrive. "skipped" covers the two
+    # ways send_email returns without delivering: no provider configured, or
+    # outgoing mail paused from the admin panel.
     email_log_service.mark(
         log_id,
-        EmailStatus.skipped if settings.email_backend == "log" else EmailStatus.sent,
+        EmailStatus.sent
+        if settings.email_backend != "log" and not email_is_paused()
+        else EmailStatus.skipped,
     )

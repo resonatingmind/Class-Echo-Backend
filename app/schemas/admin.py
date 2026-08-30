@@ -169,3 +169,83 @@ class SystemHealthOut(BaseModel):
     healthy: bool
     components: list[HealthComponent]
     checked_at: datetime
+
+
+# ── Runtime settings ─────────────────────────────────────────────────────────
+
+
+class SettingOut(BaseModel):
+    """One operational setting, its effective value, and where that came from.
+
+    `is_overridden` is the part that matters when debugging: it separates "this
+    is what the environment says" from "somebody changed this in the panel",
+    which are otherwise indistinguishable from the value alone.
+    """
+
+    key: str
+    label: str
+    description: str
+    kind: str  # string | bool | int
+    category: str
+    # bool first: bool subclasses int, and a union that tries int first can turn
+    # True into 1 on the way out.
+    value: bool | int | str
+    default: bool | int | str
+    is_overridden: bool
+
+
+class SettingUpdate(BaseModel):
+    # bool first: bool subclasses int, and a union that tries int first can turn
+    # True into 1 on the way out.
+    value: bool | int | str
+
+
+# ── Global user lookup ───────────────────────────────────────────────────────
+
+
+class UserSearchResult(BaseModel):
+    """Anyone with an account, found by email or name across every school.
+
+    Exists because answering "what happened to this person" otherwise means
+    knowing which school they belong to before you can start looking - which is
+    the one thing a support call rarely opens with.
+    """
+
+    id: int
+    name: str
+    email: str
+    role: str  # school_admin | teacher | student
+    status: str | None
+    school_id: int | None
+    school_name: str | None
+    has_password: bool
+    email_verified: bool | None
+    created_at: datetime | None
+    # Whether an invitation can be re-sent for this account, so the UI can offer
+    # the action only where a resend endpoint actually exists.
+    can_resend_invite: bool
+
+
+# ── Audit log ────────────────────────────────────────────────────────────────
+
+
+class AuditLogEntry(BaseModel):
+    """One recorded super admin action.
+
+    Every field is a snapshot taken at the time rather than a live lookup: the
+    actions most worth auditing are the ones that destroy or rename the thing
+    they touched, so resolving names on read would show blanks exactly where the
+    record matters most.
+    """
+
+    id: int
+    actor_email: str
+    action: str
+    target_type: str | None
+    target_id: int | None
+    target_label: str | None
+    school_id: int | None
+    detail: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

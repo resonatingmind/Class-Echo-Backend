@@ -28,9 +28,9 @@ from app.models.student import Student
 from app.models.school import School
 from app.models.class_ import Class
 from app.models.auth_token import AuthToken
+from app.services import invite_service
 from app.services import teacher_onboarding_service as onboarding
 from app.services.email_service import deliver_email
-from app.config import settings
 
 router = APIRouter()
 
@@ -206,7 +206,7 @@ async def teacher_register(body: TeacherRegisterRequest, db: AsyncSession = Depe
             )
         )
         await db.commit()
-        verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/verify-email?token={raw_token}"
+        verify_link = f"{invite_service.frontend_url()}/verify-email?token={raw_token}"
         deliver_email(
             teacher.email,
             "Verify your email — Class Echo",
@@ -260,7 +260,7 @@ async def school_register(body: SchoolRegisterRequest, db: AsyncSession = Depend
         )
     )
     await db.commit()
-    verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/verify-email?token={raw_token}"
+    verify_link = f"{invite_service.frontend_url()}/verify-email?token={raw_token}"
     deliver_email(
         school_admin.email,
         "Verify your email — Class Echo",

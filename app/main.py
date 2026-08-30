@@ -46,6 +46,54 @@ env_origins = os.getenv("ALLOWED_ORIGINS")
 if env_origins:
     allowed_origins.extend([o.strip() for o in env_origins.split(",") if o.strip()])
 
+# Paths maintenance mode must never block. /admin is the way back out, /auth is
+# how the super admin gets in to reach it, and the rest are how anything -
+# a browser, a health check, this app's own banner - finds out what is going on.
+MAINTENANCE_EXEMPT_PREFIXES = (
+    "/admin",
+    "/auth",
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/uploads",
+    "/public/system",
+)
+
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    """Hold writes while an operator has maintenance mode switched on.
+
+    Reads are deliberately still served. A half-broken app people can look at
+    beats a wall they can only stare at, and it means a teacher mid-lesson can
+    still see their timetable while something is being fixed underneath.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return await call_next(request)
+    if request.url.path.startswith(MAINTENANCE_EXEMPT_PREFIXES):
+        return await call_next(request)
+
+    from app.services import settings_service
+
+    try:
+        paused = bool(settings_service.get("maintenance_mode"))
+    except Exception:
+        # Never let a settings lookup take the API down; that would turn a
+        # convenience feature into an outage of its own.
+        paused = False
+
+    if not paused:
+        return await call_next(request)
+
+    try:
+        message = str(settings_service.get("maintenance_message"))
+    except Exception:
+        message = "Class Echo is briefly down for maintenance."
+
+    return JSONResponse(status_code=503, content={"detail": message})
+
+
 # Registered before CORSMiddleware so it sits *inside* it: an unhandled
 # exception otherwise escapes the CORS layer, and the browser reports the
 # resulting bare 500 as "No 'Access-Control-Allow-Origin' header" instead of

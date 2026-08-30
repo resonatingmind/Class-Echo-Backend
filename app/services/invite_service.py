@@ -19,6 +19,8 @@ from app.services.email_service import deliver_email
 
 logger = logging.getLogger(__name__)
 
+# Fallback only. The live value comes from settings_service so a school that
+# needs two weeks to onboard its staff does not need a redeploy to get it.
 INVITE_TTL_DAYS = 7
 
 
@@ -47,14 +49,38 @@ async def issue_invite_token(db: AsyncSession, user_type: str, user_id: int) -> 
             user_id=user_id,
             token_hash=token_hash,
             purpose="invite",
-            expires_at=datetime.utcnow() + timedelta(days=INVITE_TTL_DAYS),
+            expires_at=datetime.utcnow() + timedelta(days=invite_ttl_days()),
         )
     )
     return raw_token
 
 
+def invite_ttl_days() -> int:
+    from app.services import settings_service
+
+    try:
+        return int(settings_service.get("invite_ttl_days"))
+    except Exception:
+        return INVITE_TTL_DAYS
+
+
+def frontend_url() -> str:
+    """The base every emailed link is built on, overridable at runtime.
+
+    Wrapped rather than read inline because the same value is needed from the
+    verification links in auth.py, and getting these two out of step is exactly
+    the bug this is meant to make fixable without a deploy.
+    """
+    from app.services import settings_service
+
+    try:
+        return str(settings_service.get("frontend_url")).rstrip("/")
+    except Exception:
+        return settings.FRONTEND_URL.rstrip("/")
+
+
 def invite_link(raw_token: str) -> str:
-    return f"{settings.FRONTEND_URL.rstrip('/')}/accept-invite?token={raw_token}"
+    return f"{frontend_url()}/accept-invite?token={raw_token}"
 
 
 def queue_invite_email(
