@@ -13,7 +13,7 @@ from google.genai import types
 from .config import EVALUATION_PROMPT_TEMPLATE, GEMINI_MODEL, SCORE_WEIGHTS
 
 logger = logging.getLogger(__name__)
-FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
+FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-flash-latest")
 
 # Per-request timeouts (milliseconds). Without these a slow Gemini response
 # hangs the worker indefinitely instead of failing fast into a retry.
@@ -263,7 +263,10 @@ def transcribe_audio(audio_path: str) -> str:
         # Try the primary model, then progressively older ones. A model that has
         # been retired or is not gated to this API key answers 404, so a single
         # hardcoded model means every recording fails until someone edits code.
-        models_to_try = [GEMINI_MODEL, FALLBACK_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"]
+        # The tail of this list is the safety net, so it must hold models that are
+        # actually still served. gemini-2.5-flash and gemini-2.0-flash both answer
+        # 404 now, which made the net useless.
+        models_to_try = [GEMINI_MODEL, FALLBACK_MODEL, "gemini-3.5-flash", "gemini-flash-latest"]
         unique_models: list[str] = []
         for m in models_to_try:
             if m and m not in unique_models:
