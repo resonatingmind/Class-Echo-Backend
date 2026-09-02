@@ -59,6 +59,11 @@ from app.services.teacher_analytics_filters_service import (
 )
 from app.services.teacher_profile_service import get_teacher_profile
 from app.schemas.lookup import ( TeacherLookupOut, ClassLookupOut, SubjectLookupOut, )
+from app.schemas.class_filters import ClassFiltersOut
+from app.services.class_filters_service import (
+    class_name_rank,
+    get_class_filters,
+)
 
 from app.schemas.quick_assignment import (
     QuickAssignmentIn,
@@ -609,16 +614,48 @@ async def school_recording_detail(
 
 @router.get("/classes", response_model=list[ClassOut])
 async def list_classes(
+    name: str | None = Query(None, description="Filter by class name"),
+    section: str | None = Query(None, description="Filter by section"),
+    teacher_id: int | None = Query(
+        None, description="Only classes with a subject taught by this teacher"
+    ),
+    subject: str | None = Query(
+        None, description="Only classes offering a subject with this name"
+    ),
     db: AsyncSession = Depends(get_db),
     school_admin=Depends(get_active_school_admin),
 ):
+    stmt = select(Class).where(Class.school_id == school_admin.school_id)
+
+    if name:
+        stmt = stmt.where(Class.name == name)
+
+    if section:
+        stmt = stmt.where(Class.section == section)
+
+    if teacher_id is not None or subject:
+        subject_stmt = select(Subject.class_id)
+
+        if teacher_id is not None:
+            subject_stmt = subject_stmt.where(Subject.teacher_id == teacher_id)
+
+        if subject:
+            subject_stmt = subject_stmt.where(Subject.name == subject)
+
+        stmt = stmt.where(Class.id.in_(subject_stmt))
+
     result = await db.execute(
-        select(Class).where(Class.school_id == school_admin.school_id).order_by(
-    Class.name,
-    Class.section,
-)
+        stmt.order_by(class_name_rank(), Class.name, Class.section)
     )
     return result.scalars().all()
+
+
+@router.get("/classes/filters", response_model=ClassFiltersOut)
+async def list_class_filters(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    return await get_class_filters(db, school_admin.school_id)
 
 
 @router.get("/classes/lookup", response_model=ClassLookupOut)
