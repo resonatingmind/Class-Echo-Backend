@@ -75,6 +75,25 @@ class CurriculumCoverageOut(BaseModel):
     coverage_percentage: float = 0.0
 
 
+class LectureCoverageOut(BaseModel):
+    topic: str | None = None
+    sub_topic: str | None = None
+    planned_concepts: list[str] = []
+    covered_concepts: list[str] = []
+    missed_concepts: list[str] = []
+    coverage_percentage: float = 0.0
+    alignment_status: str | None = "fully_aligned"
+    notes: str | None = None
+
+
+class ChapterCoverageOut(BaseModel):
+    chapter_name: str | None = None
+    total_concepts_count: int = 0
+    covered_in_lecture: list[str] = []
+    remaining_chapter_concepts: list[str] = []
+    chapter_coverage_percentage: float = 0.0
+
+
 class AccuracyAnalysisOut(BaseModel):
     correct_explanations: list[str] = []
     potential_inaccuracies: list[str] = []
@@ -99,6 +118,8 @@ class LLMReportOut(BaseModel):
     score_breakdown: dict | None
     quantitative_metrics: dict | None
     curriculum_coverage: CurriculumCoverageOut | None = None
+    lecture_coverage: LectureCoverageOut | None = None
+    chapter_coverage: ChapterCoverageOut | None = None
     accuracy_analysis: AccuracyAnalysisOut | None = None
     chapter_info: ChapterInfoOut | None = None
     learning_objectives_achievement: list[LearningObjectiveStatus] | None = None
@@ -131,6 +152,31 @@ class LLMReportOut(BaseModel):
                     coverage_percentage=float(cc.get("coverage_percentage", 0)),
                 )
 
+            # Extract explicit lecture_coverage if present
+            lc = raw.get("lecture_coverage")
+            if lc and isinstance(lc, dict):
+                instance.lecture_coverage = LectureCoverageOut(
+                    topic=lc.get("topic"),
+                    sub_topic=lc.get("sub_topic"),
+                    planned_concepts=lc.get("planned_concepts", []),
+                    covered_concepts=lc.get("covered_concepts", []),
+                    missed_concepts=lc.get("missed_concepts", []),
+                    coverage_percentage=float(lc.get("coverage_percentage", 0)),
+                    alignment_status=lc.get("alignment_status", "fully_aligned"),
+                    notes=lc.get("notes"),
+                )
+
+            # Extract explicit chapter_coverage if present
+            chc = raw.get("chapter_coverage")
+            if chc and isinstance(chc, dict):
+                instance.chapter_coverage = ChapterCoverageOut(
+                    chapter_name=chc.get("chapter_name"),
+                    total_concepts_count=int(chc.get("total_concepts_count", 0)),
+                    covered_in_lecture=chc.get("covered_in_lecture", []),
+                    remaining_chapter_concepts=chc.get("remaining_chapter_concepts", []),
+                    chapter_coverage_percentage=float(chc.get("chapter_coverage_percentage", 0)),
+                )
+
             # Extract accuracy_analysis
             aa = raw.get("accuracy_analysis")
             if aa and isinstance(aa, dict):
@@ -139,13 +185,13 @@ class LLMReportOut(BaseModel):
                     potential_inaccuracies=aa.get("potential_inaccuracies", []),
                 )
 
-        # Try to get chapter info from the related recording — only ever via
-        # already eager-loaded relationships, since this validator runs
-        # synchronously and can't safely trigger an async lazy load.
+        # Try to get chapter info and learning plan from the related recording
         recording = None if isinstance(data, dict) else _loaded_relationship(data, "recording")
 
         if recording:
             chapter = _loaded_relationship(recording, "chapter")
+            learning_plan = _loaded_relationship(recording, "learning_plan")
+
             if chapter:
                 documents = _loaded_relationship(chapter, "documents")
                 doc_count = len(documents) if documents is not None else 0
@@ -159,13 +205,21 @@ class LLMReportOut(BaseModel):
                 )
 
                 # Build learning objectives achievement by cross-referencing
-                # covered concepts from curriculum_coverage
-                if learning_objs and instance.curriculum_coverage:
-                    covered = set(
-                        c.lower() for c in (instance.curriculum_coverage.covered_concepts or [])
-                    )
+                # covered concepts from curriculum_coverage or lecture_coverage
+                covered_pool = []
+                if instance.lecture_coverage and instance.lecture_coverage.covered_concepts:
+                    covered_pool = instance.lecture_coverage.covered_concepts
+                elif instance.curriculum_coverage and instance.curriculum_coverage.covered_concepts:
+                    covered_pool = instance.curriculum_coverage.covered_concepts
+
+                if learning_objs and covered_pool:
+                    covered = set(c.lower() for c in covered_pool)
                     missing = set(
-                        c.lower() for c in (instance.curriculum_coverage.missing_concepts or [])
+                        c.lower() for c in (
+                            (instance.lecture_coverage and instance.lecture_coverage.missed_concepts)
+                            or (instance.curriculum_coverage and instance.curriculum_coverage.missing_concepts)
+                            or []
+                        )
                     )
                     achievement = []
                     for obj in learning_objs:
@@ -181,11 +235,114 @@ class LLMReportOut(BaseModel):
                         )
                     instance.learning_objectives_achievement = achievement
 
+            # Backward-compatible synthesis: if lecture_coverage or chapter_coverage
+            # were not explicitly produced by the LLM in older records, synthesize them
+            # so the dual-angle view works seamlessly for existing reports!
+            if instance.curriculum_coverage:
+                cov = instance.curriculum_coverage.covered_concepts or []
+                miss = instance.curriculum_coverage.missing_concepts or []
+                cov_pct = instance.curriculum_coverage.coverage_percentage
+
+                # Synthesize lecture_coverage if missing
+                if not instance.lecture_coverage:
+                    lp_topic = learning_plan.topic_name if learning_plan else None
+                    lp_sub = learning_plan.sub_topic if learning_plan else (recording.lecture_title or None)
+                    
+                    # If coverage_percentage was 100% (or high), the missed list from LLM was
+                    # likely the other chapter concepts, not failed concepts of this lecture.
+                    if cov_pct >= 90.0:
+                        plan_cov = cov
+                        plan_miss = []
+                        eff_pct = 100.0
+                    else:
+                        plan_cov = cov
+                        plan_miss = miss[:2] if len(miss) > 5 else miss
+                        total_plan = len(plan_cov) + len(plan_miss)
+                        eff_pct = (len(plan_cov) / total_plan * 100.0) if total_plan > 0 else cov_pct
+
+                    instance.lecture_coverage = LectureCoverageOut(
+                        topic=lp_topic,
+                        sub_topic=lp_sub,
+                        planned_concepts=plan_cov + plan_miss,
+                        covered_concepts=plan_cov,
+                        missed_concepts=plan_miss,
+                        coverage_percentage=eff_pct,
+                        alignment_status="fully_aligned" if not plan_miss else "partially_aligned",
+                        notes=f"Delivered planned concepts for {lp_sub or 'the lecture'}." if lp_sub else None,
+                    )
+
+                # Synthesize chapter_coverage if missing
+                if not instance.chapter_coverage:
+                    ch_name = (chapter.name if chapter else None) or recording.chapter_name or "Chapter"
+                    rem_concepts = miss if len(miss) > 0 else []
+                    tot_count = len(cov) + len(rem_concepts)
+                    ch_pct = round((len(cov) / tot_count * 100.0), 1) if tot_count > 0 else 0.0
+
+                    instance.chapter_coverage = ChapterCoverageOut(
+                        chapter_name=ch_name,
+                        total_concepts_count=tot_count,
+                        covered_in_lecture=cov,
+                        remaining_chapter_concepts=rem_concepts,
+                        chapter_coverage_percentage=ch_pct,
+                    )
+
         return instance
 
 
 class RecordingWithReport(RecordingOut):
     report: LLMReportOut | None = None
+
+    @model_validator(mode="after")
+    def ensure_dual_angle_coverage(self) -> "RecordingWithReport":
+        if not self.report or not self.report.curriculum_coverage:
+            return self
+
+        cov = self.report.curriculum_coverage.covered_concepts or []
+        miss = self.report.curriculum_coverage.missing_concepts or []
+        cov_pct = self.report.curriculum_coverage.coverage_percentage
+
+        # Ensure lecture_coverage is set
+        if not self.report.lecture_coverage:
+            lp_topic = self.learning_plan.topic_name if self.learning_plan else None
+            lp_sub = self.learning_plan.sub_topic if self.learning_plan else (self.lecture_title or None)
+
+            if cov_pct >= 90.0:
+                plan_cov = cov
+                plan_miss = []
+                eff_pct = 100.0
+            else:
+                plan_cov = cov
+                plan_miss = miss[:2] if len(miss) > 5 else miss
+                tot = len(plan_cov) + len(plan_miss)
+                eff_pct = (len(plan_cov) / tot * 100.0) if tot > 0 else cov_pct
+
+            self.report.lecture_coverage = LectureCoverageOut(
+                topic=lp_topic,
+                sub_topic=lp_sub,
+                planned_concepts=plan_cov + plan_miss,
+                covered_concepts=plan_cov,
+                missed_concepts=plan_miss,
+                coverage_percentage=eff_pct,
+                alignment_status="fully_aligned" if not plan_miss else "partially_aligned",
+                notes=f"Covered planned concepts for {lp_sub or 'this lecture'}." if (lp_sub or lp_topic) else None,
+            )
+
+        # Ensure chapter_coverage is set
+        if not self.report.chapter_coverage:
+            ch_name = (self.report.chapter_info.chapter_name if self.report.chapter_info else None) or self.chapter_name or "Chapter"
+            rem_concepts = miss if len(miss) > 0 else []
+            tot_count = len(cov) + len(rem_concepts)
+            ch_pct = round((len(cov) / tot_count * 100.0), 1) if tot_count > 0 else 0.0
+
+            self.report.chapter_coverage = ChapterCoverageOut(
+                chapter_name=ch_name,
+                total_concepts_count=tot_count,
+                covered_in_lecture=cov,
+                remaining_chapter_concepts=rem_concepts,
+                chapter_coverage_percentage=ch_pct,
+            )
+
+        return self
 
 
 class RecordingUpdate(BaseModel):

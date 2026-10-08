@@ -4,6 +4,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.recording import Recording
 from app.models.chapter import Chapter
+from app.models.llm_report import LLMReport
 
 
 async def get_recording_detail(
@@ -15,12 +16,11 @@ async def get_recording_detail(
         .options(
             selectinload(Recording.teacher),
             selectinload(Recording.subject),
-            selectinload(Recording.report),
-
+            selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.learning_plan),
             selectinload(Recording.chapter).selectinload(
                 Chapter.documents
             ),
-
             selectinload(Recording.chapter).selectinload(
                 Chapter.knowledge
             ),

@@ -66,15 +66,26 @@ Score each dimension strictly and provide:
 | language_accessibility | 10 | Clarity of explanation, effectiveness of code-switching (if any), explaining technical jargon. |
 | closure_recap | 5 | Summarizing key points at the end of the lecture and defining clear takeaways. |
 
-## Curriculum Coverage & Accuracy Analysis
-Additionally, perform a curriculum coverage and technical accuracy analysis:
-1. curriculum_coverage:
-   - Identify which key concepts and must-cover concepts from reference context were covered.
-   - Identify which key concepts and must-cover concepts from reference context were missed.
-   - Compute the coverage percentage (covered_concepts / total_concepts * 100).
-2. accuracy_analysis:
-   - Identify correct and clear explanations from the transcript.
-   - Identify any potential inaccuracies or misconceptions compared to the RAG reference context.
+## Curriculum Coverage & Accuracy Analysis (Dual-Angle Evaluation)
+Evaluate the curriculum and content from TWO distinct perspectives:
+
+Perspective 1: Particular Lecture Angle (Micro-Planner Alignment)
+- Review the specific lecture learning plan provided under LECTURE LEARNING PLAN (MICRO PLANNER).
+- Identify which concepts/topics were explicitly planned for THIS specific lecture.
+- Determine which of these planned lecture concepts were successfully covered in the lecture transcript.
+- Identify if any concepts planned specifically for this lecture were missed/skipped (if none, return []).
+- Compute lecture coverage percentage: (covered_concepts / planned_concepts * 100). If no explicit plan is provided, evaluate against the topics taught.
+- Provide a brief alignment note explaining how faithfully the lecture followed the micro-planner.
+
+Perspective 2: Full Chapter Angle (Overall Curriculum Scope)
+- Review the complete chapter reference under RAG REFERENCE CONTEXT (all key concepts and must-cover topics of the entire textbook chapter).
+- Identify which chapter concepts were addressed during this lecture.
+- Identify the remaining chapter concepts that belong to the rest of the chapter syllabus (these are intended for other/future lectures, NOT missed by the teacher today).
+- Compute chapter coverage percentage: (concepts_taught_in_this_lecture / total_chapter_concepts * 100).
+
+Accuracy Analysis:
+- Identify correct and clear explanations from the transcript.
+- Identify any potential inaccuracies or misconceptions compared to the RAG reference context.
 
 ## Quantitative Estimates
 Estimate from the transcript:
@@ -108,11 +119,32 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
   "overall_notes": "<2-3 sentence overall assessment of teaching effectiveness>",
   "top_strengths": ["<specific strength 1>", "<specific strength 2>"],
   "priority_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"],
+  
+  "lecture_coverage": {{
+    "topic": "<string topic from micro planner or lecture>",
+    "sub_topic": "<string sub topic from micro planner or lecture>",
+    "planned_concepts": [<list of concepts planned for this specific lecture>],
+    "covered_concepts": [<list of planned concepts covered in this lecture>],
+    "missed_concepts": [<list of planned concepts missed/skipped in this lecture, or [] if none>],
+    "coverage_percentage": <float or int 0-100, percentage of lecture plan completed>,
+    "alignment_status": "<fully_aligned|partially_aligned|diverged>",
+    "notes": "<1-2 sentence assessment of adherence to the lecture micro-planner>"
+  }},
+
+  "chapter_coverage": {{
+    "chapter_name": "<string chapter name>",
+    "total_concepts_count": <int total key concepts in entire chapter>,
+    "covered_in_lecture": [<list of chapter concepts taught in this lecture>],
+    "remaining_chapter_concepts": [<list of concepts in chapter to be covered in other/future lectures>],
+    "chapter_coverage_percentage": <float or int 0-100, proportion of full chapter covered in this single lecture>
+  }},
+
   "curriculum_coverage": {{
     "covered_concepts": [<list of covered concepts>],
-    "missing_concepts": [<list of missed concepts>],
+    "missing_concepts": [<list of missed concepts from lecture plan, or remaining concepts>],
     "coverage_percentage": <float or int 0-100>
   }},
+
   "accuracy_analysis": {{
     "correct_explanations": [<list of correct explanation descriptions or quotes>],
     "potential_inaccuracies": [<list of potential inaccuracies or misconceptions found>]
@@ -140,3 +172,4 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
   }}
 }}
 """.strip().strip()
+

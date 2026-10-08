@@ -3,6 +3,7 @@ import json
 import logging
 from sqlalchemy.orm import Session
 from google import genai
+from google.genai import types
 from app.config import settings
 from app.models.chapter_chunk import ChapterChunk
 from app.models.chapter_knowledge import ChapterKnowledge
@@ -53,35 +54,45 @@ def retrieve_chapter_context(session: Session, chapter_id: int, transcript: str)
 
     # Generate embedding
     api_key = settings.GEMINI_API_KEY
-    if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY is not configured.")
-    
-    client = genai.Client(api_key=api_key)
-    # text-embedding-004 token limit is ~2048, so we truncate if it's too long
-    truncated_transcript = transcript[:8000]
-    
-    from google.genai import types
+    chunks = []
+    if api_key:
+        try:
+            client = genai.Client(api_key=api_key)
+            truncated_transcript = transcript[:8000]
 
-    response = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=truncated_transcript,
-        config=types.EmbedContentConfig(
-            output_dimensionality=1536
+            response = client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=truncated_transcript,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=1536
+                )
+            )
+            raw_vector = response.embeddings[0].values
+            padded_vector = raw_vector + [0.0] * (1536 - len(raw_vector))
+
+            chunks = (
+                session.query(ChapterChunk)
+                .filter(ChapterChunk.chapter_id == chapter_id)
+                .order_by(ChapterChunk.embedding_vector.op("<=>")(padded_vector))
+                .limit(10)
+                .all()
+            )
+        except Exception as e:
+            logger.warning(f"Embedding search failed for chapter {chapter_id}: {e}. Falling back to recent chunks.")
+            chunks = (
+                session.query(ChapterChunk)
+                .filter(ChapterChunk.chapter_id == chapter_id)
+                .limit(10)
+                .all()
+            )
+    else:
+        chunks = (
+            session.query(ChapterChunk)
+            .filter(ChapterChunk.chapter_id == chapter_id)
+            .limit(10)
+            .all()
         )
-    )
-    
-    raw_vector = response.embeddings[0].values
-    padded_vector = raw_vector + [0.0] * (1536 - len(raw_vector))
 
-    # Search ChapterChunk table
-    # We use <=> for cosine distance in pgvector
-    chunks = (
-        session.query(ChapterChunk)
-        .filter(ChapterChunk.chapter_id == chapter_id)
-        .order_by(ChapterChunk.embedding_vector.op("<=>")(padded_vector))
-        .limit(10)
-        .all()
-    )
 
     retrieved_chunks = [
         {
