@@ -10,7 +10,13 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
-from .config import EVALUATION_PROMPT_TEMPLATE, GEMINI_MODEL, SCORE_WEIGHTS
+from .config import (
+    EVALUATION_PROMPT_TEMPLATE,
+    GEMINI_MODEL,
+    SCORE_WEIGHTS,
+    SCORING_503_RETRY_DELAYS_S,
+)
+from .transcript_metrics import apply_metrics, compute_metrics, format_for_prompt
 
 logger = logging.getLogger(__name__)
 FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-flash-latest")
@@ -81,7 +87,15 @@ def _upload_and_wait(client: genai.Client, audio_path: str):
         delay = min(delay * 1.5, 5.0)
 
 
-def _call_gemini(client: genai.Client, reference_context: dict | None = None) -> str:
+class ScoringModelUnavailableError(RuntimeError):
+    """The pinned scoring model is retired or not gated to this key; retrying cannot help."""
+
+
+def _call_gemini(
+    client: genai.Client,
+    reference_context: dict | None = None,
+    measured_facts: str | None = None,
+) -> str:
     if not reference_context:
         reference_context = {}
 
@@ -138,13 +152,18 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
         key_concepts=concepts,
         must_cover_topics=must_cover,
         learning_plan_info=learning_plan_info,
+        measured_facts=measured_facts or "Not available.",
         retrieved_chunks=chunks_str
     )
 
-    for model in [GEMINI_MODEL, FALLBACK_MODEL]:
+    # Pinned to one model. Falling back to another model on a 503 meant two
+    # lectures could be scored by different models depending on load, which
+    # made their scores incomparable. A busy model is retried here, then the
+    # error goes to the Celery task, which retries again with backoff.
+    for attempt, delay in enumerate((*SCORING_503_RETRY_DELAYS_S, None), start=1):
         try:
             response = client.models.generate_content(
-                model=model,
+                model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     http_options=types.HttpOptions(timeout=EVALUATE_TIMEOUT_MS),
@@ -152,18 +171,21 @@ def _call_gemini(client: genai.Client, reference_context: dict | None = None) ->
             )
             return response.text
         except genai_errors.ServerError:
-            if model == FALLBACK_MODEL:
+            if delay is None:
                 raise
-            logger.warning("Model %s unavailable (503), falling back to %s", model, FALLBACK_MODEL)
+            logger.warning(
+                "Scoring model %s unavailable (503), retrying in %ss (attempt %d)",
+                GEMINI_MODEL, delay, attempt,
+            )
+            time.sleep(delay)
         except genai_errors.ClientError as exc:
-            # A retired or ungated model answers 404, not 503 — without this the
-            # fallback never engaged and every recording failed outright.
-            if model == FALLBACK_MODEL or "404" not in str(exc):
-                raise
-            logger.warning("Model %s not available (404), falling back to %s", model, FALLBACK_MODEL)
+            if "404" in str(exc):
+                raise ScoringModelUnavailableError(
+                    f"Scoring model {GEMINI_MODEL} is not available to this API key "
+                    f"(404). Set GEMINI_MODEL to a served model."
+                ) from exc
+            raise
 
-    # Unreachable while the loop has at least one model that either returns or
-    # raises, but an explicit failure beats returning None into the JSON parser.
     raise RuntimeError("No Gemini model was able to evaluate the recording.")
 
 
@@ -351,6 +373,12 @@ def evaluate(audio_path: str | None, reference_context: dict | None = None) -> d
         logger.info("Transcript not found in reference_context. Transcribing audio first...")
         reference_context["transcript"] = transcribe_audio(audio_path)
 
-    raw = _call_gemini(client, reference_context)
+    duration = reference_context.get("duration_seconds")
+    metrics = compute_metrics(reference_context["transcript"], duration)
+
+    raw = _call_gemini(client, reference_context, format_for_prompt(metrics, duration))
     parsed = _parse_response(raw)
-    return _validate_and_fix(parsed)
+    result = apply_metrics(_validate_and_fix(parsed), metrics)
+    # Recorded so a report can always be traced to the model that scored it.
+    result["scoring_model"] = GEMINI_MODEL
+    return result

@@ -15,6 +15,15 @@ from app.services.rag_service import retrieve_chapter_context, redis_client
 from app.tasks.llm_tasks import process_recording
 
 
+# Long enough to pass the transcript quality gate (MIN_TRANSCRIPT_WORDS).
+TRANSCRIPT = (
+    "Today we will learn about derivatives. A derivative tells us how fast a "
+    "function changes. If you drive a car, the speedometer shows the derivative "
+    "of distance with respect to time. Can anyone tell me the derivative of x "
+    "squared? Yes, it is two x, by the power rule."
+)
+
+
 class FakeGeminiResponse:
     def __init__(self, text: str):
         self.text = text
@@ -250,7 +259,7 @@ async def test_process_recording_with_rag(subject, teacher_user):
     )
     mock_genai_client.models.generate_content.side_effect = [
         # First call is transcription
-        FakeGeminiResponse("Today we will learn about derivatives."),
+        FakeGeminiResponse(TRANSCRIPT),
         # Second call is evaluation
         FakeGeminiResponse(
             json.dumps({
@@ -290,7 +299,7 @@ async def test_process_recording_with_rag(subject, teacher_user):
     async with AsyncSessionLocal() as session:
         recording = await session.get(Recording, recording_id)
         assert recording.status == "completed"
-        assert recording.transcription == "Today we will learn about derivatives."
+        assert recording.transcription == TRANSCRIPT
         
         # Reload and assert report details
         from sqlalchemy.orm import selectinload

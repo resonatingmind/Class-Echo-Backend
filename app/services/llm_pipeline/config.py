@@ -11,6 +11,20 @@ import os
 # no longer usable as the default. Verified working against the live API.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
+# Scoring is pinned to GEMINI_MODEL: a 503 is retried on the same model rather
+# than handed to a fallback, so every report is scored by the same model and
+# scores stay comparable. Transcription may still fall back (see evaluator).
+SCORING_503_RETRY_DELAYS_S: tuple[float, ...] = (10, 30)
+
+# ── Transcript quality gate (see transcript_metrics.check_transcript) ──
+# Below this many words there is nothing to evaluate.
+MIN_TRANSCRIPT_WORDS = 30
+# Classroom speech runs ~80-160 wpm even with pauses; far below this means most
+# of the audio was not transcribed.
+MIN_TRANSCRIPT_WPM = 15
+# The wpm check only applies once the recording is long enough to judge.
+MIN_WPM_CHECK_DURATION_S = 120
+
 # ── Scoring rubric weights (must sum to 100) ──
 SCORE_WEIGHTS: dict[str, int] = {
     "verbal_clarity":          20,
@@ -42,6 +56,9 @@ Must-Cover Topics: {must_cover_topics}
 
 --- LECTURE LEARNING PLAN (MICRO PLANNER) ---
 {learning_plan_info}
+
+--- MEASURED FACTS (computed from the audio and transcript; treat as ground truth) ---
+{measured_facts}
 
 Retrieved Reference Chunks:
 {retrieved_chunks}
@@ -77,10 +94,11 @@ Additionally, perform a curriculum coverage and technical accuracy analysis:
    - Identify any potential inaccuracies or misconceptions compared to the RAG reference context.
 
 ## Quantitative Estimates
+Speaking rate, filler count and question count are in MEASURED FACTS above. Use
+those numbers when judging pacing, verbal clarity and engagement, and do not
+contradict them in findings. Return 0 for wpm_estimate, filler_words_heard and
+questions_asked; they are filled in from the measurements afterwards.
 Estimate from the transcript:
-- wpm_estimate: approximate words per minute (integer)
-- filler_words_heard: total count of filler words heard in the transcript (um, uh, basically, you know, sort of, etc.)
-- questions_asked: number of questions directed at students
 - languages_detected: list of language names heard/used (e.g. ["Hindi", "English"])
 - code_switching_frequency: "none" | "low" | "medium" | "high"
 

@@ -1,10 +1,96 @@
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from celery.signals import worker_ready
 from celery_worker import celery_app
 from app.services.llm import analyze_recording
 
 logger = logging.getLogger(__name__)
+
+# A healthy run (15 min transcription + 10 min scoring timeouts, two retries)
+# finishes well inside this. Anything older was orphaned.
+STUCK_PROCESSING_AFTER = timedelta(hours=2)
+# A queued task normally starts within seconds; one this old was lost with the
+# broker (Render's free Redis is in-memory and drops its queue on restart).
+STUCK_PENDING_AFTER = timedelta(hours=1)
+
+STUCK_PROCESSING_REASON = (
+    "Analysis was interrupted before it finished (the analysis service "
+    "restarted). Tap Retry analysis to run it again."
+)
+
+
+def recover_stuck_recordings(session, now: datetime | None = None) -> dict:
+    """
+    Recover recordings left in pending/processing by a worker or broker restart.
+
+    Five recordings sat in "processing" for up to a month with no error, which
+    the teacher sees as a spinner that never ends. This sweep:
+
+    - re-queues stale `pending` recordings: their task never started, so
+      running it again is safe;
+    - fails stale `processing` recordings with a reason and leaves the retry
+      to the teacher's "Retry analysis" button. Re-queuing these automatically
+      could loop forever if the recording itself is what crashed the worker
+      (e.g. memory on a very long lecture).
+
+    Recording has no updated_at, so age is measured from uploaded_at. That can
+    only make a long-queued recording look older than it is, and the
+    thresholds are far above any real processing time.
+    """
+    from app.models.recording import Recording, RecordingStatus
+
+    now = now or datetime.utcnow()
+    stale_processing = (
+        session.query(Recording)
+        .filter(
+            Recording.status == RecordingStatus.processing,
+            Recording.uploaded_at < now - STUCK_PROCESSING_AFTER,
+        )
+        .all()
+    )
+    for rec in stale_processing:
+        rec.status = RecordingStatus.failed
+        rec.error_reason = STUCK_PROCESSING_REASON
+
+    stale_pending = (
+        session.query(Recording)
+        .filter(
+            Recording.status == RecordingStatus.pending,
+            Recording.uploaded_at < now - STUCK_PENDING_AFTER,
+        )
+        .all()
+    )
+    requeue = [(rec.id, rec.cloudinary_url) for rec in stale_pending]
+    session.commit()
+
+    for rec_id, url in requeue:
+        process_recording.delay(rec_id, url)
+
+    summary = {
+        "failed": [r.id for r in stale_processing],
+        "requeued": [rec_id for rec_id, _ in requeue],
+    }
+    if summary["failed"] or summary["requeued"]:
+        logger.warning("Recovered stuck recordings: %s", summary)
+    return summary
+
+
+@worker_ready.connect
+def _recover_on_worker_start(**_kwargs):
+    """A worker (re)start is exactly when orphaned recordings appear."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.config import settings
+
+    try:
+        engine = create_engine(settings.sync_migration_url)
+        with sessionmaker(bind=engine)() as session:
+            recover_stuck_recordings(session)
+    except Exception:
+        # Never stop the worker from starting over a recovery sweep.
+        logger.exception("Stuck-recording recovery failed")
 
 
 @celery_app.task(bind=True, max_retries=2)
@@ -43,19 +129,33 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             from app.services.llm import _download_audio
             from app.services.llm_pipeline.evaluator import transcribe_audio
             from app.services.rag_service import retrieve_chapter_context
+            from app.services.llm_pipeline.transcript_metrics import (
+                TranscriptTooShortError,
+                check_transcript,
+            )
 
             fresh_url = sign_url(recording.cloudinary_url) or cloudinary_url
 
+            # Transcribe up front for every recording, not only those with a
+            # chapter, so the transcript is stored and can be quality-checked
+            # before anything is scored.
+            if not recording.transcription:
+                logger.info(f"Recording {recording_id} is missing transcription. Transcribing audio now...")
+                tmp_audio = _download_audio(fresh_url)
+                recording.transcription = transcribe_audio(tmp_audio)
+                session.commit()
+
+            try:
+                check_transcript(recording.transcription, recording.duration_seconds)
+            except TranscriptTooShortError:
+                # Drop the unusable transcript so Retry analysis transcribes
+                # the audio again instead of re-failing on the stored text.
+                recording.transcription = None
+                session.commit()
+                raise
+
             reference_context = None
             if recording.chapter_id:
-                # If we don't have transcription, transcribe it first
-                if not recording.transcription:
-                    logger.info(f"Recording {recording_id} is missing transcription. Transcribing audio now...")
-                    tmp_audio = _download_audio(fresh_url)
-                    transcript = transcribe_audio(tmp_audio)
-                    recording.transcription = transcript
-                    session.commit()
-
                 # Retrieve chapter context
                 if recording.transcription:
                     logger.info(f"Retrieving chapter context for chapter {recording.chapter_id}")
@@ -69,6 +169,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 reference_context = {}
             if recording.transcription:
                 reference_context["transcript"] = recording.transcription
+            reference_context["duration_seconds"] = recording.duration_seconds
 
             if recording.learning_plan_id:
                 from app.models.learning_plan import LearningPlan
@@ -222,6 +323,9 @@ def _is_permanent(exc: Exception) -> bool:
         return True
     if isinstance(exc, RuntimeError) and "could not transcribe" in str(exc).lower():
         return True
+    from app.services.llm_pipeline.evaluator import ScoringModelUnavailableError
+    if isinstance(exc, ScoringModelUnavailableError):
+        return True
     return False
 
 
@@ -267,6 +371,10 @@ def _classify_error(exc: Exception) -> str:
 
     if isinstance(exc, FileNotFoundError):
         return "The audio file could not be found or downloaded. It may have been deleted or the link expired."
+
+    from app.services.llm_pipeline.evaluator import ScoringModelUnavailableError
+    if isinstance(exc, ScoringModelUnavailableError):
+        return "The AI scoring model is not available. Please contact your administrator."
 
     if isinstance(exc, EnvironmentError) and "GEMINI_API_KEY" in msg:
         return "The AI service is not configured. Please contact your administrator."
