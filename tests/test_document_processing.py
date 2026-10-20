@@ -101,7 +101,7 @@ async def test_celery_task_processing(db_session: AsyncSession, subject):
     mock_client.models.embed_content.return_value = FakeEmbedResponse([FakeEmbedding(fake_embedding_values)])
 
     with patch("app.tasks.document_tasks.httpx.Client.get") as mock_get, \
-         patch("app.tasks.document_tasks.extract_text_and_elements", return_value=fake_text_elements) as mock_extract, \
+         patch("app.services.document_processor.extract_text_and_elements", return_value=fake_text_elements) as mock_extract, \
          patch("google.genai.Client", return_value=mock_client):
 
         # Mock downloading
@@ -134,3 +134,106 @@ async def test_celery_task_processing(db_session: AsyncSession, subject):
             # Assert first 768 elements are 0.1, rest are 0.0
             assert chunks[0].embedding_vector[:768] == [0.1] * 768
             assert chunks[0].embedding_vector[768:] == [0.0] * 768
+
+
+# ── Failure handling: permanent errors fail fast, transient ones retry ────────
+
+
+async def _make_doc(db_session, subject, **overrides) -> ChapterDocument:
+    chapter = Chapter(subject_id=subject.id, name="Limits", description="Limits introduction")
+    db_session.add(chapter)
+    await db_session.commit()
+    await db_session.refresh(chapter)
+
+    fields = dict(
+        chapter_id=chapter.id,
+        file_name="limits.pdf",
+        storage_url="https://fake-s3.com/limits.pdf",
+        file_type="PDF",
+        processing_status="PENDING",
+    )
+    fields.update(overrides)
+    doc = ChapterDocument(**fields)
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+    return doc
+
+
+def _read_doc(doc_id: int) -> ChapterDocument:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.config import settings
+
+    engine = create_engine(settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"))
+    try:
+        with sessionmaker(bind=engine)() as session:
+            doc = session.get(ChapterDocument, doc_id)
+            session.expunge(doc)
+            return doc
+    finally:
+        engine.dispose()
+
+
+def _http_response(status: int):
+    import httpx
+
+    return httpx.Response(status, request=httpx.Request("GET", "https://fake-s3.com/limits.pdf"))
+
+
+@pytest.mark.asyncio
+async def test_refused_download_fails_immediately_with_reason(db_session: AsyncSession, subject):
+    doc = await _make_doc(db_session, subject)
+
+    with patch("app.tasks.document_tasks.httpx.Client.get", return_value=_http_response(401)) as mock_get:
+        from app.tasks.document_tasks import process_chapter_document
+
+        process_chapter_document(doc.id)  # no Retry raised
+
+    assert mock_get.call_count == 1
+    stored = _read_doc(doc.id)
+    assert stored.processing_status == "FAILED"
+    assert "HTTP 401" in stored.error_reason
+
+
+@pytest.mark.asyncio
+async def test_storage_outage_is_retried_not_failed(db_session: AsyncSession, subject):
+    import httpx
+
+    doc = await _make_doc(db_session, subject)
+
+    with patch("app.tasks.document_tasks.httpx.Client.get", return_value=_http_response(503)):
+        from app.tasks.document_tasks import process_chapter_document
+
+        # Called directly (not via a worker), self.retry() re-raises the
+        # original error instead of scheduling — that it raises at all is the
+        # retry path; the permanent path above returns quietly.
+        with pytest.raises(httpx.HTTPStatusError):
+            process_chapter_document(doc.id)
+
+    stored = _read_doc(doc.id)
+    assert stored.processing_status == "PROCESSING"
+    assert stored.error_reason is None
+
+
+@pytest.mark.asyncio
+async def test_document_without_text_fails_instead_of_completing(db_session: AsyncSession, subject):
+    doc = await _make_doc(db_session, subject)
+    ok = MagicMock()
+    ok.content = b"%PDF-1.4"
+
+    with patch("app.tasks.document_tasks.httpx.Client.get", return_value=ok), \
+         patch("app.services.document_processor.extract_text_and_elements", return_value=[]):
+        from app.tasks.document_tasks import process_chapter_document
+
+        process_chapter_document(doc.id)
+
+    stored = _read_doc(doc.id)
+    assert stored.processing_status == "FAILED"
+    assert "No readable text" in stored.error_reason
+
+
+def test_signed_download_url_ignores_non_cloudinary_urls():
+    from app.services.cloudinary_service import signed_download_url
+
+    assert signed_download_url("https://fake-s3.com/limits.pdf") is None

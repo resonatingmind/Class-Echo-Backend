@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     # is a far cheaper mistake, and local runs set this in .env anyway.
     FRONTEND_URL: str = "https://class-echo-frontend.vercel.app"
 
+    # Forgot-password requests allowed per (email, client IP) pair within the
+    # window. Counted per request, whether or not the email has an account, so
+    # hitting the limit reveals nothing about who is registered.
+    PASSWORD_RESET_LIMIT: int = 10
+    PASSWORD_RESET_WINDOW_HOURS: int = 24
+
     @field_validator(
         "DATABASE_URL",
         "MIGRATION_DATABASE_URL",

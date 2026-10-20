@@ -47,7 +47,11 @@ python seed_admin.py
 # Start celery worker in the background.
 # Concurrency comes from celery_worker.py unless CELERY_CONCURRENCY overrides it
 # — a hardcoded --concurrency flag here silently beats the app config.
-celery -A celery_worker.celery_app worker --loglevel=info \
-    ${CELERY_CONCURRENCY:+--concurrency=$CELERY_CONCURRENCY} &
+# Set RUN_WORKER_IN_API=false when the worker runs as its own container
+# (deploy/ec2/docker-compose.yml), otherwise every task gets two consumers.
+if [ "${RUN_WORKER_IN_API:-true}" = "true" ]; then
+    celery -A celery_worker.celery_app worker --loglevel=info \
+        ${CELERY_CONCURRENCY:+--concurrency=$CELERY_CONCURRENCY} &
+fi
 # Start uvicorn
 uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"

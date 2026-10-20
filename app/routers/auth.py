@@ -5,6 +5,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.config import settings
+from app.core import rate_limit
 from app.database import get_db
 from app.core.security import (
     verify_password,
@@ -20,6 +22,8 @@ from app.schemas.auth import (
     AcceptInviteRequest,
     TeacherRegisterRequest,
     SchoolRegisterRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.models.admin import Admin
 from app.models.school_admin import SchoolAdmin
@@ -29,6 +33,7 @@ from app.models.school import School
 from app.models.class_ import Class
 from app.models.auth_token import AuthToken
 from app.services import invite_service
+from app.services import password_reset_service
 from app.services import teacher_onboarding_service as onboarding
 from app.services.email_service import deliver_email
 
@@ -299,3 +304,80 @@ async def verify_email(token: str, db: AsyncSession = Depends(get_db)):
     record.used_at = datetime.utcnow()
     await db.commit()
     return {"email_verified": True}
+
+
+# Returned whether or not the address belongs to an account, so this endpoint
+# cannot be used to find out who is registered.
+FORGOT_PASSWORD_RESPONSE = {
+    "detail": "If an account exists for that email, a password reset link has been sent."
+}
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
+    # Checked before the account lookup so known and unknown emails hit the
+    # limit identically. Lower-cased so case variants share one counter.
+    limit_key = f"forgot-password:{body.email.lower()}:{rate_limit.client_ip(request)}"
+    if not rate_limit.hit(
+        limit_key,
+        settings.PASSWORD_RESET_LIMIT,
+        settings.PASSWORD_RESET_WINDOW_HOURS * 3600,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many password reset requests for this email. Please try again later.",
+        )
+
+    for role, Model in ROLE_MODELS:
+        result = await db.execute(select(Model).where(Model.email == body.email))
+        user = result.scalar_one_or_none()
+        # Invited accounts have no password yet; their invite link is how they
+        # set one, and a reset here would quietly activate them.
+        if user and user.hashed_password:
+            break
+    else:
+        return FORGOT_PASSWORD_RESPONSE
+
+    raw_token = await password_reset_service.issue_reset_token(db, role, user.id)
+    await db.commit()
+    password_reset_service.send_reset_email(
+        to_email=user.email,
+        to_name=getattr(user, "name", None),
+        raw_token=raw_token,
+        user_type=role,
+        user_id=user.id,
+        school_id=getattr(user, "school_id", None),
+    )
+    return FORGOT_PASSWORD_RESPONSE
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    invalid = HTTPException(
+        status_code=400,
+        detail="This reset link is invalid or has expired. Request a new one.",
+    )
+    result = await db.execute(
+        select(AuthToken).where(
+            AuthToken.token_hash == hash_token(body.token),
+            AuthToken.purpose == password_reset_service.PURPOSE,
+        )
+    )
+    record = result.scalar_one_or_none()
+    if not record or record.used_at or record.expires_at < datetime.utcnow():
+        raise invalid
+
+    Model = dict(ROLE_MODELS).get(record.user_type)
+    user = await db.get(Model, record.user_id) if Model else None
+    if not user:
+        raise invalid
+
+    user.hashed_password = hash_password(body.password)
+    # Opening a link sent to the inbox proves ownership of the address.
+    if hasattr(user, "email_verified"):
+        user.email_verified = True
+    await password_reset_service.burn_reset_tokens(db, record.user_type, user.id)
+    await db.commit()
+    return {"password_reset": True}

@@ -34,6 +34,7 @@ class ChapterDocumentOut(BaseModel):
     storage_url: str
     file_type: str
     processing_status: str
+    error_reason: str | None = None
     uploaded_at: datetime
 
     class Config:

@@ -5,7 +5,7 @@ from app.database import Base
 
 
 class AuthToken(Base):
-    """Shared token store for invite and email-verification links.
+    """Shared token store for invite, email-verification and password-reset links.
 
     Polymorphic on (user_type, user_id) rather than a hard FK, consistent with
     how login already resolves accounts across separate per-role tables.
@@ -14,10 +14,10 @@ class AuthToken(Base):
     __tablename__ = "auth_tokens"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    user_type: Mapped[str] = mapped_column(String(30))  # "school_admin" | "teacher"
+    user_type: Mapped[str] = mapped_column(String(30))  # any role in auth.ROLE_MODELS
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    purpose: Mapped[str] = mapped_column(String(30))  # "invite" | "email_verification"
+    purpose: Mapped[str] = mapped_column(String(30))  # "invite" | "email_verification" | "password_reset"
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

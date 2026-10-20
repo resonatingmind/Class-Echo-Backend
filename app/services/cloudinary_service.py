@@ -218,3 +218,39 @@ def delete_audio(public_id: str) -> None:
 
 def is_cloudinary_url(url: str | None) -> bool:
     return bool(url) and "res.cloudinary.com" in url
+
+
+def signed_download_url(delivery_url: str, expires_in: int = 3600) -> str | None:
+    """An API-authenticated download link for a stored Cloudinary asset.
+
+    Public delivery URLs are subject to account-level restrictions — new
+    accounts refuse PDF delivery outright ("deny or ACL failure") — which made
+    every uploaded PDF unprocessable. The download API is signed with our own
+    credentials and is not affected by those settings. Returns None when the
+    URL is not one of ours or cannot be parsed, so callers fall back to it as-is.
+    """
+    import re
+    import time
+
+    match = re.search(
+        r"res\.cloudinary\.com/[^/]+/(image|video|raw)/upload/(?:v\d+/)?(.+?)(?:\?.*)?$",
+        delivery_url or "",
+    )
+    if not match:
+        return None
+    resource_type, public_id = match.groups()
+
+    _configure()
+    import cloudinary.utils
+
+    fmt = ""
+    if resource_type != "raw" and "." in public_id.rsplit("/", 1)[-1]:
+        # Only raw public_ids keep their extension; for the others it is the format.
+        public_id, _, fmt = public_id.rpartition(".")
+    return cloudinary.utils.private_download_url(
+        public_id,
+        fmt,
+        resource_type=resource_type,
+        type="upload",
+        expires_at=int(time.time()) + expires_in,
+    )

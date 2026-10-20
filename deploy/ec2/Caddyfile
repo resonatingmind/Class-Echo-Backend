@@ -1,0 +1,18 @@
+# SITE_ADDRESS comes from deploy/ec2/.env:
+#   :80                     → plain HTTP on the instance IP (no certificate)
+#   api.yourdomain.com      → Caddy obtains and renews a Let's Encrypt cert
+{$SITE_ADDRESS} {
+	encode gzip
+
+	# Recordings are uploaded as whole files; allow large bodies.
+	request_body {
+		max_size 500MB
+	}
+
+	reverse_proxy api:8000 {
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}

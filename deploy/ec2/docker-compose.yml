@@ -1,0 +1,97 @@
+# Class Echo backend on a single EC2 instance.
+#
+#   caddy     → public entrypoint on :80/:443, HTTPS once SITE_ADDRESS is a domain
+#   api       → FastAPI (runs migrations + admin seed on start)
+#   worker    → Celery worker, same image, separate container
+#   redis     → Celery broker / result backend / RAG cache
+#
+# The database is Supabase (DATABASE_URL / MIGRATION_DATABASE_URL in .env), not
+# a container here, so no application data lives on this instance.
+#
+# Only caddy publishes ports. Redis and the API are reachable only on the
+# internal Docker network.
+#
+# Usage (from this directory):  docker compose up -d --build
+
+name: classecho
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend: &backend
+  build:
+    context: ../..
+  image: classecho-backend:latest
+  restart: unless-stopped
+  env_file: .env
+  logging: *logging
+  depends_on:
+    redis:
+      condition: service_healthy
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    logging: *logging
+
+  api:
+    <<: *backend
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RUN_WORKER_IN_API: "false"
+      PORT: "8000"
+    volumes:
+      - uploads_data:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  worker:
+    <<: *backend
+    command: >
+      bash -c "celery -A celery_worker.celery_app worker --loglevel=info
+      --concurrency=$${CELERY_CONCURRENCY:-2}"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      # Only used if no object storage is configured and files fall back to local disk.
+      INTERNAL_API_BASE_URL: http://api:8000
+    volumes:
+      - uploads_data:/app/uploads
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly so queued Celery tasks survive a restart
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+volumes:
+  redis_data:
+  uploads_data:
+  caddy_data:
+  caddy_config:

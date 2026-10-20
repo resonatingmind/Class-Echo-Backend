@@ -1929,14 +1929,14 @@ async def _set_user_password(
             if user_type == "school_admin":
                 user.approved_by_admin_id = admin.id
 
-    # An invite or verification link still sitting in an inbox would let whoever
-    # holds it overwrite the password that was just set, so burn them.
+    # An invite, verification or reset link still sitting in an inbox would let
+    # whoever holds it overwrite the password that was just set, so burn them.
     await db.execute(
         update(AuthToken)
         .where(
             AuthToken.user_type == user_type,
             AuthToken.user_id == user.id,
-            AuthToken.purpose.in_(("invite", "email_verification")),
+            AuthToken.purpose.in_(("invite", "email_verification", "password_reset")),
             AuthToken.used_at.is_(None),
         )
         .values(used_at=datetime.utcnow())

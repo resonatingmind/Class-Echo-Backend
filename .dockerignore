@@ -46,3 +46,6 @@ test_error.txt
 .vscode/
 .idea/
 Thumbs.db
+
+# EC2 deployment kit (not needed inside the image)
+deploy/
