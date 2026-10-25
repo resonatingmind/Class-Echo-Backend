@@ -33,6 +33,9 @@ class Recording(Base):
         Enum(RecordingStatus), default=RecordingStatus.pending
     )
     error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Where a `processing` recording is: "transcribing" or "analysing". Null at
+    # every other status. Lets the app show progress instead of one spinner.
+    processing_step: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_archived: Mapped[bool] = mapped_column(default=False, nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

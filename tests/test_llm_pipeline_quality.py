@@ -179,6 +179,8 @@ def _rec(session, status, age):
 def test_recovery_fails_old_processing_and_requeues_old_pending(sqlite_session):
     s = sqlite_session
     old_proc = _rec(s, RecordingStatus.processing, timedelta(days=30))
+    old_proc.processing_step = "analysing"
+    s.commit()
     new_proc = _rec(s, RecordingStatus.processing, timedelta(minutes=20))
     old_pend = _rec(s, RecordingStatus.pending, timedelta(hours=3))
     new_pend = _rec(s, RecordingStatus.pending, timedelta(minutes=5))
@@ -192,6 +194,60 @@ def test_recovery_fails_old_processing_and_requeues_old_pending(sqlite_session):
     s.expire_all()
     assert old_proc.status == RecordingStatus.failed
     assert "Retry analysis" in old_proc.error_reason
+    assert old_proc.processing_step is None
     assert new_proc.status == RecordingStatus.processing
     assert new_pend.status == RecordingStatus.pending
     assert done.status == RecordingStatus.completed
+
+
+# ── Processing step ──────────────────────────────────────────────────────────
+
+def _run_task_on(session, rec, analyse_error):
+    """Run process_recording against the sqlite session, recording the step the
+    app would see while transcription and scoring are under way."""
+    engine = session.get_bind()
+    seen = {}
+
+    def step_now():
+        with sessionmaker(bind=engine)() as s:
+            return s.get(Recording, rec.id).processing_step
+
+    def fake_transcribe(_path):
+        seen["transcribing"] = step_now()
+        return LESSON
+
+    def fake_analyse(*_a, **_k):
+        seen["analysing"] = step_now()
+        raise analyse_error
+
+    with patch("sqlalchemy.create_engine", return_value=engine), \
+         patch("app.services.s3_service.sign_url", return_value=None), \
+         patch("app.services.llm._download_audio", return_value="/nonexistent.mp3"), \
+         patch("app.services.llm_pipeline.evaluator.transcribe_audio", side_effect=fake_transcribe), \
+         patch.object(llm_tasks, "analyze_recording", side_effect=fake_analyse), \
+         pytest.raises(type(analyse_error)):
+        llm_tasks.process_recording.run(rec.id, rec.cloudinary_url)
+    session.expire_all()
+    return seen
+
+
+def test_processing_step_follows_transcription_then_analysis(sqlite_session):
+    rec = _rec(sqlite_session, RecordingStatus.pending, timedelta(0))
+
+    # A permanent error ends the task at once, so the final state is checkable.
+    seen = _run_task_on(sqlite_session, rec, FileNotFoundError("gone"))
+
+    assert seen == {"transcribing": "transcribing", "analysing": "analysing"}
+    assert rec.status == RecordingStatus.failed
+    assert rec.processing_step is None
+
+
+def test_processing_step_skips_transcribing_when_transcript_uploaded(sqlite_session):
+    rec = _rec(sqlite_session, RecordingStatus.pending, timedelta(0))
+    rec.transcription = LESSON
+    sqlite_session.commit()
+
+    seen = _run_task_on(sqlite_session, rec, FileNotFoundError("gone"))
+
+    assert "transcribing" not in seen
+    assert seen["analysing"] == "analysing"

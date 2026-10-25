@@ -52,6 +52,7 @@ def recover_stuck_recordings(session, now: datetime | None = None) -> dict:
     for rec in stale_processing:
         rec.status = RecordingStatus.failed
         rec.error_reason = STUCK_PROCESSING_REASON
+        rec.processing_step = None
 
     stale_pending = (
         session.query(Recording)
@@ -123,6 +124,8 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
 
             recording.status = RecordingStatus.processing
             recording.error_reason = None
+            # A recording uploaded with a transcript skips straight to analysis.
+            recording.processing_step = "analysing" if recording.transcription else "transcribing"
             session.commit()
 
             from app.services.s3_service import sign_url
@@ -153,6 +156,9 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 recording.transcription = None
                 session.commit()
                 raise
+
+            recording.processing_step = "analysing"
+            session.commit()
 
             reference_context = None
             if recording.chapter_id:
@@ -248,6 +254,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
 
             recording.status = RecordingStatus.completed
             recording.error_reason = None
+            recording.processing_step = None
             recording.processed_at = datetime.utcnow()
             session.commit()
 
@@ -283,7 +290,10 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                     if is_final_attempt:
                         recording.status = RecordingStatus.failed
                         recording.error_reason = error_reason
+                        recording.processing_step = None
                     else:
+                        # Still `processing`: the step stays where it failed
+                        # until the retry starts over and sets it again.
                         recording.error_reason = f"Retrying ({self.request.retries + 1}/{self.max_retries + 1}): {error_reason}"
                     session.commit()
         except Exception as db_exc:

@@ -19,7 +19,7 @@ Accounts:
     Student       student@demo.test    /  password123
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from dotenv import load_dotenv
 from sqlalchemy import select
@@ -30,7 +30,9 @@ import app.models  # noqa: F401 — register all models
 from app.config import settings
 from app.core.security import hash_password
 from app.database import AsyncSessionLocal
+from app.models.chapter import Chapter
 from app.models.class_ import Class
+from app.models.learning_plan import LearningPlan
 from app.models.llm_report import LLMReport
 from app.models.recording import Recording, RecordingStatus
 from app.models.school import School
@@ -38,6 +40,7 @@ from app.models.school_admin import SchoolAdmin
 from app.models.student import Student
 from app.models.subject import Subject
 from app.models.teacher import Teacher
+from app.models.timetable_entry import TimetableEntry
 
 PASSWORD = "password123"
 LOCAL_DB_HOSTS = ("@postgres:", "@localhost:", "@127.0.0.1:")
@@ -146,104 +149,211 @@ async def main():
     async with AsyncSessionLocal() as session:
         existing = await session.execute(select(Teacher).where(Teacher.email == "teacher@demo.test"))
         if existing.scalar_one_or_none():
-            print("Local dev data already seeded.")
-            return
+            print("Users and recordings already seeded.")
+        else:
+            await seed_users_and_recordings(session)
+        await seed_planner_and_timetable(session)
 
-        school = School(name="Demo Public School", address="12 Test Lane, Pune")
-        session.add(school)
-        await session.flush()
-
-        session.add(SchoolAdmin(
-            name="Priya Sharma",
-            email="principal@demo.test",
-            hashed_password=hash_password(PASSWORD),
-            school_id=school.id,
-            status="active",
-            email_verified=True,
-        ))
-
-        class_ = Class(name="Grade 9", section="A", school_id=school.id)
-        teacher = Teacher(
-            name="Anil Mehta",
-            email="teacher@demo.test",
-            hashed_password=hash_password(PASSWORD),
-            school_id=school.id,
-            status="active",
-            email_verified=True,
-            approved_at=datetime.utcnow(),
-        )
-        session.add_all([class_, teacher])
-        await session.flush()
-
-        subject = Subject(
-            name="Mathematics",
-            class_id=class_.id,
-            teacher_id=teacher.id,
-            teacher_assigned_at=datetime.utcnow(),
-        )
-        session.add(subject)
-        session.add(Student(
-            name="Riya Patel",
-            email="student@demo.test",
-            hashed_password=hash_password(PASSWORD),
-            school_id=school.id,
-            class_id=class_.id,
-            mobile_number="9000000001",
-        ))
-        await session.flush()
-
-        now = datetime.utcnow()
-        common = dict(
-            subject_id=subject.id,
-            teacher_id=teacher.id,
-            chapter_name="Linear Equations in Two Variables",
-            cloudinary_url=SAMPLE_AUDIO,
-            cloudinary_public_id=SAMPLE_AUDIO,
-            duration_seconds=SAMPLE_AUDIO_SECONDS,
-        )
-
-        completed = Recording(
-            **common,
-            lecture_title="Introduction to linear equations",
-            transcription=TRANSCRIPT,
-            status=RecordingStatus.completed,
-            uploaded_at=now - timedelta(days=1),
-            processed_at=now - timedelta(days=1, minutes=-3),
-        )
-        processing = Recording(
-            **common,
-            lecture_title="Plotting solutions on a graph",
-            status=RecordingStatus.processing,
-            uploaded_at=now - timedelta(minutes=2),
-        )
-        failed = Recording(
-            **common,
-            lecture_title="Lines parallel to the axes",
-            status=RecordingStatus.failed,
-            error_reason="Too little speech was detected in the recording.",
-            uploaded_at=now - timedelta(hours=3),
-        )
-        session.add_all([completed, processing, failed])
-        await session.flush()
-
-        session.add(LLMReport(
-            recording_id=completed.id,
-            overall_score=float(sum(d["score"] for d in SCORE_BREAKDOWN.values())),
-            teaching_quality_notes=(
-                "A well-structured introduction that built clearly on last week's lesson and used a "
-                "familiar example to motivate two variables. Student participation was limited to one "
-                "learner, and the lesson ended without a recap."
-            ),
-            score_breakdown=SCORE_BREAKDOWN,
-            quantitative_metrics=QUANTITATIVE_METRICS,
-            raw_llm_response=RAW_LLM_RESPONSE,
-        ))
-        await session.commit()
-
-    print("Seeded local dev data. Password for every account:", PASSWORD)
+    print("Password for every account:", PASSWORD)
     print("  School admin  principal@demo.test")
     print("  Teacher       teacher@demo.test")
     print("  Student       student@demo.test")
+
+
+async def seed_users_and_recordings(session):
+    school = School(name="Demo Public School", address="12 Test Lane, Pune")
+    session.add(school)
+    await session.flush()
+
+    session.add(SchoolAdmin(
+        name="Priya Sharma",
+        email="principal@demo.test",
+        hashed_password=hash_password(PASSWORD),
+        school_id=school.id,
+        status="active",
+        email_verified=True,
+    ))
+
+    class_ = Class(name="Grade 9", section="A", school_id=school.id)
+    teacher = Teacher(
+        name="Anil Mehta",
+        email="teacher@demo.test",
+        hashed_password=hash_password(PASSWORD),
+        school_id=school.id,
+        status="active",
+        email_verified=True,
+        approved_at=datetime.utcnow(),
+    )
+    session.add_all([class_, teacher])
+    await session.flush()
+
+    subject = Subject(
+        name="Mathematics",
+        class_id=class_.id,
+        teacher_id=teacher.id,
+        teacher_assigned_at=datetime.utcnow(),
+    )
+    session.add(subject)
+    session.add(Student(
+        name="Riya Patel",
+        email="student@demo.test",
+        hashed_password=hash_password(PASSWORD),
+        school_id=school.id,
+        class_id=class_.id,
+        mobile_number="9000000001",
+    ))
+    await session.flush()
+
+    now = datetime.utcnow()
+    common = dict(
+        subject_id=subject.id,
+        teacher_id=teacher.id,
+        chapter_name="Linear Equations in Two Variables",
+        cloudinary_url=SAMPLE_AUDIO,
+        cloudinary_public_id=SAMPLE_AUDIO,
+        duration_seconds=SAMPLE_AUDIO_SECONDS,
+    )
+
+    completed = Recording(
+        **common,
+        lecture_title="Introduction to linear equations",
+        transcription=TRANSCRIPT,
+        status=RecordingStatus.completed,
+        uploaded_at=now - timedelta(days=1),
+        processed_at=now - timedelta(days=1, minutes=-3),
+    )
+    processing = Recording(
+        **common,
+        lecture_title="Plotting solutions on a graph",
+        status=RecordingStatus.processing,
+        processing_step="analysing",
+        uploaded_at=now - timedelta(minutes=2),
+    )
+    failed = Recording(
+        **common,
+        lecture_title="Lines parallel to the axes",
+        status=RecordingStatus.failed,
+        error_reason="Too little speech was detected in the recording.",
+        uploaded_at=now - timedelta(hours=3),
+    )
+    session.add_all([completed, processing, failed])
+    await session.flush()
+
+    session.add(LLMReport(
+        recording_id=completed.id,
+        overall_score=float(sum(d["score"] for d in SCORE_BREAKDOWN.values())),
+        teaching_quality_notes=(
+            "A well-structured introduction that built clearly on last week's lesson and used a "
+            "familiar example to motivate two variables. Student participation was limited to one "
+            "learner, and the lesson ended without a recap."
+        ),
+        score_breakdown=SCORE_BREAKDOWN,
+        quantitative_metrics=QUANTITATIVE_METRICS,
+        raw_llm_response=RAW_LLM_RESPONSE,
+    ))
+    await session.commit()
+    print("Seeded users and recordings.")
+
+
+# Chapters and planner lectures for Mathematics, dated in days from the seed
+# run. The three seeded recordings are linked to the first three lectures; the
+# fourth has no recording and is planned for tomorrow, so "Record" on the
+# timetable suggests it as today's lecture tomorrow and as the next one after.
+CHAPTERS = [
+    ("Linear Equations in Two Variables", [
+        ("Introduction to linear equations", -2),
+        ("Plotting solutions on a graph", -1),
+        ("Lines parallel to the axes", None),
+        ("Word problems with two variables", 1),
+    ]),
+    ("Lines and Angles", [
+        ("Basic terms and definitions", None),
+        ("Pairs of angles", None),
+    ]),
+]
+
+# (period, start, end, subject) for Monday-Saturday. Science only exists so the
+# day has more than one subject in it.
+DAY_PLAN = [
+    (1, time(8, 0), time(8, 45), "Mathematics"),
+    (2, time(9, 0), time(9, 45), "Science"),
+    (3, time(10, 0), time(10, 45), "Mathematics"),
+    (4, time(11, 30), time(12, 15), "Science"),
+    (5, time(13, 0), time(13, 45), "Mathematics"),
+]
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+
+async def seed_planner_and_timetable(session):
+    teacher = (await session.execute(
+        select(Teacher).where(Teacher.email == "teacher@demo.test")
+    )).scalar_one()
+    maths = (await session.execute(
+        select(Subject).where(Subject.teacher_id == teacher.id, Subject.name == "Mathematics")
+    )).scalar_one()
+
+    has_chapters = (await session.execute(
+        select(Chapter).where(Chapter.subject_id == maths.id)
+    )).first()
+    if has_chapters:
+        print("Planner and timetable already seeded.")
+        return
+
+    recordings = {
+        r.lecture_title: r
+        for r in (await session.execute(
+            select(Recording).where(Recording.subject_id == maths.id)
+        )).scalars()
+    }
+    today = date.today()
+    for chapter_name, lectures in CHAPTERS:
+        chapter = Chapter(subject_id=maths.id, name=chapter_name)
+        session.add(chapter)
+        await session.flush()
+        for sub_topic, day_offset in lectures:
+            plan = LearningPlan(
+                chapter_id=chapter.id,
+                topic_name=chapter_name,
+                sub_topic=sub_topic,
+                date=(today + timedelta(days=day_offset)).isoformat() if day_offset is not None else None,
+            )
+            session.add(plan)
+            await session.flush()
+            rec = recordings.get(sub_topic)
+            if rec:
+                rec.chapter_id = chapter.id
+                rec.chapter_name = chapter_name
+                rec.learning_plan_id = plan.id
+
+    science = (await session.execute(
+        select(Subject).where(Subject.teacher_id == teacher.id, Subject.name == "Science")
+    )).scalar_one_or_none()
+    if not science:
+        science = Subject(
+            name="Science",
+            class_id=maths.class_id,
+            teacher_id=teacher.id,
+            teacher_assigned_at=datetime.utcnow(),
+        )
+        session.add(science)
+        await session.flush()
+
+    subjects = {"Mathematics": maths, "Science": science}
+    for day in WEEKDAYS:
+        for period, start, end, subject_name in DAY_PLAN:
+            session.add(TimetableEntry(
+                school_id=teacher.school_id,
+                class_id=maths.class_id,
+                subject_id=subjects[subject_name].id,
+                teacher_id=teacher.id,
+                day_of_week=day,
+                period_number=period,
+                start_time=start,
+                end_time=end,
+                room="9A",
+            ))
+    await session.commit()
+    print("Seeded chapters, lesson plans, a Science subject and a Monday-Saturday timetable.")
 
 
 if __name__ == "__main__":

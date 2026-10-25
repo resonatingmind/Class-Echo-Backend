@@ -815,6 +815,7 @@ async def upload_recording(
         )
         existing_recording.status = RecordingStatus.pending
         existing_recording.error_reason = None
+        existing_recording.processing_step = None
         existing_recording.processed_at = None
         existing_recording.uploaded_at = func.now()
 
@@ -939,6 +940,7 @@ async def retry_recording(
     recording.status = RecordingStatus.pending
     recording.processed_at = None
     recording.error_reason = None
+    recording.processing_step = None
     await db.commit()
 
     await _queue_analysis(db, recording)

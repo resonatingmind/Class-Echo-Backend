@@ -35,6 +35,7 @@ class RecordingOut(BaseModel):
     duration_seconds: float | None
     status: RecordingStatus
     error_reason: str | None = None
+    processing_step: str | None = None
     is_archived: bool = False
     uploaded_at: datetime
     processed_at: datetime | None

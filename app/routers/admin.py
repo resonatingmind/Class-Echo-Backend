@@ -604,6 +604,7 @@ async def retry_recording(
     )
     recording.status = RecordingStatus.pending
     recording.error_reason = None
+    recording.processing_step = None
     recording.processed_at = None
     await db.commit()
 

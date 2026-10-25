@@ -299,6 +299,7 @@ async def test_process_recording_with_rag(subject, teacher_user):
     async with AsyncSessionLocal() as session:
         recording = await session.get(Recording, recording_id)
         assert recording.status == "completed"
+        assert recording.processing_step is None
         assert recording.transcription == TRANSCRIPT
         
         # Reload and assert report details
