@@ -251,3 +251,81 @@ def test_processing_step_skips_transcribing_when_transcript_uploaded(sqlite_sess
 
     assert "transcribing" not in seen
     assert seen["analysing"] == "analysing"
+
+
+# ── Structured scoring output (rubric 2) ─────────────────────────────────────
+
+def test_scoring_call_is_schema_constrained_at_temperature_zero():
+    client = MagicMock()
+    client.models.generate_content.return_value = _Resp(_llm_json())
+    with patch.object(evaluator, "_get_client", return_value=client):
+        result = evaluator.evaluate(None, {"transcript": LESSON, "duration_seconds": 300})
+
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.temperature == 0
+    assert config.response_mime_type == "application/json"
+    schema = config.response_json_schema
+    assert set(schema["properties"]["scores"]["required"]) == set(evaluator.SCORE_WEIGHTS)
+    assert schema["properties"]["strengths"]["minItems"] == 2
+    assert schema["properties"]["improvements"]["maxItems"] == 3
+    assert result["rubric_version"] == evaluator.RUBRIC_VERSION
+
+
+def test_improvements_get_exactly_one_focus_listed_first():
+    result = evaluator._validate_and_fix({
+        "improvements": [
+            {"area": "pacing_delivery", "observation": "a", "try_this": "t", "why": "w", "is_focus": False},
+            {"area": "student_engagement", "observation": "b", "try_this": "t", "why": "w", "is_focus": True},
+            {"area": "closure_recap", "observation": "c", "try_this": "t", "why": "w", "is_focus": True},
+            {"area": "verbal_clarity", "observation": "d", "try_this": "t", "why": "w", "is_focus": False},
+        ],
+    })
+    imps = result["improvements"]
+    assert [i["observation"] for i in imps] == ["b", "a", "c"]
+    assert [i["is_focus"] for i in imps] == [True, False, False]
+    # Plain copies stay in step for older app builds.
+    assert result["priority_improvements"] == ["b", "a", "c"]
+
+
+def test_no_focus_marked_defaults_to_first_and_unknown_area_is_dropped():
+    result = evaluator._validate_and_fix({
+        "improvements": [{"area": "charisma", "observation": "a", "is_focus": False}, "not an object"],
+        "strengths": [{"area": "verbal_clarity", "text": "s1", "evidence": "q"}, {"text": ""}],
+    })
+    assert result["improvements"] == [
+        {"area": None, "observation": "a", "try_this": "", "why": "", "is_focus": True},
+    ]
+    assert result["strengths"] == [{"area": "verbal_clarity", "text": "s1", "evidence": "q"}]
+    assert result["top_strengths"] == ["s1"]
+
+
+def test_report_out_lifts_legacy_string_findings():
+    from app.schemas.recording import LLMReportOut
+
+    out = LLMReportOut.model_validate({
+        "id": 1, "recording_id": 1, "overall_score": 70, "teaching_quality_notes": "",
+        "score_breakdown": {}, "created_at": datetime(2026, 10, 1),
+        "quantitative_metrics": {"top_strengths": ["s1", "s2", "s3"], "priority_improvements": ["i1", "i2"]},
+        "raw_llm_response": {"model": "old"},
+    })
+    assert [s.text for s in out.strengths] == ["s1", "s2"]
+    assert [(i.observation, i.is_focus, i.try_this) for i in out.improvements] == [
+        ("i1", True, ""), ("i2", False, ""),
+    ]
+
+
+def test_report_out_prefers_structured_findings():
+    from app.schemas.recording import LLMReportOut
+
+    out = LLMReportOut.model_validate({
+        "id": 1, "recording_id": 1, "overall_score": 70, "teaching_quality_notes": "",
+        "score_breakdown": {}, "created_at": datetime(2026, 10, 1), "rubric_version": "2",
+        "quantitative_metrics": {"top_strengths": ["plain"], "priority_improvements": ["plain"]},
+        "raw_llm_response": {
+            "strengths": [{"area": "verbal_clarity", "text": "s", "evidence": "q"}],
+            "improvements": [{"area": "closure_recap", "observation": "o", "try_this": "t", "why": "w", "is_focus": True}],
+        },
+    })
+    assert out.strengths[0].evidence == "q"
+    assert out.improvements[0].try_this == "t"
+    assert out.rubric_version == "2"

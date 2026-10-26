@@ -43,6 +43,7 @@ def analyze_recording(
         "score_breakdown":        dict,  per-dimension {score, finding, evidence}
         "quantitative_metrics":   dict,  wpm, fillers, questions, languages, strengths, improvements
         "raw_llm_response":       dict,
+        "rubric_version":         str,
     }
     """
     # The evaluation call is text-only. If a transcript is already available
@@ -67,4 +68,5 @@ def analyze_recording(
             "priority_improvements": result["priority_improvements"],
         },
         "raw_llm_response": result,
+        "rubric_version":   result["rubric_version"],
     }

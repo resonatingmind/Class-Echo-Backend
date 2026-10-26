@@ -13,8 +13,11 @@ from google.genai import types
 from .config import (
     EVALUATION_PROMPT_TEMPLATE,
     GEMINI_MODEL,
+    RUBRIC_VERSION,
     SCORE_WEIGHTS,
     SCORING_503_RETRY_DELAYS_S,
+    SCORING_RESPONSE_SCHEMA,
+    SCORING_TEMPERATURE,
 )
 from .transcript_metrics import apply_metrics, compute_metrics, format_for_prompt
 
@@ -165,8 +168,14 @@ def _call_gemini(
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
+                # Schema-constrained JSON at temperature 0: the new fields
+                # (try-this, focus) are only reliable with a schema, and the
+                # same transcript should score the same every time.
                 config=types.GenerateContentConfig(
                     http_options=types.HttpOptions(timeout=EVALUATE_TIMEOUT_MS),
+                    temperature=SCORING_TEMPERATURE,
+                    response_mime_type="application/json",
+                    response_json_schema=SCORING_RESPONSE_SCHEMA,
                 ),
             )
             return response.text
@@ -208,6 +217,50 @@ def _parse_response(raw: str | None) -> dict:
         ) from exc
 
 
+def _area(value) -> str | None:
+    return value if value in SCORE_WEIGHTS else None
+
+
+def _normalize_strengths(items) -> list[dict]:
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if text:
+            out.append({
+                "area": _area(item.get("area")),
+                "text": text,
+                "evidence": str(item.get("evidence", "")).strip(),
+            })
+    return out[:2]
+
+
+def _normalize_improvements(items) -> list[dict]:
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        observation = str(item.get("observation", "")).strip()
+        if observation:
+            out.append({
+                "area": _area(item.get("area")),
+                "observation": observation,
+                "try_this": str(item.get("try_this", "")).strip(),
+                "why": str(item.get("why", "")).strip(),
+                "is_focus": bool(item.get("is_focus")),
+            })
+    out = out[:3]
+    # Exactly one focus, listed first. The schema can't express "exactly one
+    # true", so the model's first pick wins and the first item is the default.
+    if out:
+        focus = next((i for i, x in enumerate(out) if x["is_focus"]), 0)
+        out.insert(0, out.pop(focus))
+        for i, x in enumerate(out):
+            x["is_focus"] = i == 0
+    return out
+
+
 def _validate_and_fix(result: dict) -> dict:
     scores = result.get("scores", {})
     for dim, max_val in SCORE_WEIGHTS.items():
@@ -233,8 +286,11 @@ def _validate_and_fix(result: dict) -> dict:
     result["quantitative"] = quant
 
     result.setdefault("overall_notes", "")
-    result["top_strengths"] = [str(s) for s in result.get("top_strengths", [])]
-    result["priority_improvements"] = [str(s) for s in result.get("priority_improvements", [])]
+    result["strengths"] = _normalize_strengths(result.get("strengths"))
+    result["improvements"] = _normalize_improvements(result.get("improvements"))
+    # Plain-text copies for app builds that predate structured findings.
+    result["top_strengths"] = [s["text"] for s in result["strengths"]]
+    result["priority_improvements"] = [i["observation"] for i in result["improvements"]]
 
     # Handle curriculum_coverage and accuracy_analysis
     cc = result.setdefault("curriculum_coverage", {})
@@ -379,6 +435,7 @@ def evaluate(audio_path: str | None, reference_context: dict | None = None) -> d
     raw = _call_gemini(client, reference_context, format_for_prompt(metrics, duration))
     parsed = _parse_response(raw)
     result = apply_metrics(_validate_and_fix(parsed), metrics)
-    # Recorded so a report can always be traced to the model that scored it.
+    # Recorded so a report can always be traced to the model and rubric that scored it.
     result["scoring_model"] = GEMINI_MODEL
+    result["rubric_version"] = RUBRIC_VERSION
     return result

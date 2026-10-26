@@ -94,6 +94,82 @@ def _recover_on_worker_start(**_kwargs):
         logger.exception("Stuck-recording recovery failed")
 
 
+def build_reference_context(session, recording) -> dict:
+    """Everything the scorer is given besides the prompt: transcript, duration,
+    chapter knowledge and retrieved chunks, and the matching learning plan."""
+    from app.services.rag_service import retrieve_chapter_context
+
+    reference_context = None
+    if recording.chapter_id:
+        # Retrieve chapter context
+        if recording.transcription:
+            logger.info(f"Retrieving chapter context for chapter {recording.chapter_id}")
+            reference_context = retrieve_chapter_context(
+                session=session,
+                chapter_id=recording.chapter_id,
+                transcript=recording.transcription
+            )
+
+    if reference_context is None:
+        reference_context = {}
+    if recording.transcription:
+        reference_context["transcript"] = recording.transcription
+    reference_context["duration_seconds"] = recording.duration_seconds
+
+    if recording.learning_plan_id:
+        from app.models.learning_plan import LearningPlan
+        lp = session.get(LearningPlan, recording.learning_plan_id)
+        if lp:
+            reference_context["learning_plan"] = {
+                "id": lp.id,
+                "date": lp.date,
+                "topic_name": lp.topic_name,
+                "sub_topic": lp.sub_topic,
+                "classwork_activities": lp.classwork_activities,
+                "assessment_task": lp.assessment_task,
+                "teaching_aids": lp.teaching_aids,
+                "learning_outcomes": lp.learning_outcomes,
+            }
+    elif recording.chapter_id:
+        from app.models.learning_plan import LearningPlan
+        plans = session.query(LearningPlan).filter(LearningPlan.chapter_id == recording.chapter_id).all()
+        if plans:
+            matched = None
+            if recording.lecture_title:
+                title_clean = recording.lecture_title.strip().lower()
+                for p in plans:
+                    if p.sub_topic and p.sub_topic.strip().lower() == title_clean:
+                        matched = p
+                        break
+                    if p.topic_name and p.topic_name.strip().lower() == title_clean:
+                        matched = p
+                        break
+            if matched:
+                reference_context["learning_plan"] = {
+                    "id": matched.id,
+                    "date": matched.date,
+                    "topic_name": matched.topic_name,
+                    "sub_topic": matched.sub_topic,
+                    "classwork_activities": matched.classwork_activities,
+                    "assessment_task": matched.assessment_task,
+                    "teaching_aids": matched.teaching_aids,
+                    "learning_outcomes": matched.learning_outcomes,
+                }
+            else:
+                reference_context["chapter_learning_plans"] = [
+                    {
+                        "id": p.id,
+                        "topic_name": p.topic_name,
+                        "sub_topic": p.sub_topic,
+                        "classwork_activities": p.classwork_activities,
+                        "learning_outcomes": p.learning_outcomes,
+                    }
+                    for p in plans
+                ]
+
+    return reference_context
+
+
 @celery_app.task(bind=True, max_retries=2)
 def process_recording(self, recording_id: int, cloudinary_url: str):
     """
@@ -131,7 +207,6 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             from app.services.s3_service import sign_url
             from app.services.llm import _download_audio
             from app.services.llm_pipeline.evaluator import transcribe_audio
-            from app.services.rag_service import retrieve_chapter_context
             from app.services.llm_pipeline.transcript_metrics import (
                 TranscriptTooShortError,
                 check_transcript,
@@ -160,73 +235,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             recording.processing_step = "analysing"
             session.commit()
 
-            reference_context = None
-            if recording.chapter_id:
-                # Retrieve chapter context
-                if recording.transcription:
-                    logger.info(f"Retrieving chapter context for chapter {recording.chapter_id}")
-                    reference_context = retrieve_chapter_context(
-                        session=session,
-                        chapter_id=recording.chapter_id,
-                        transcript=recording.transcription
-                    )
-
-            if reference_context is None:
-                reference_context = {}
-            if recording.transcription:
-                reference_context["transcript"] = recording.transcription
-            reference_context["duration_seconds"] = recording.duration_seconds
-
-            if recording.learning_plan_id:
-                from app.models.learning_plan import LearningPlan
-                lp = session.get(LearningPlan, recording.learning_plan_id)
-                if lp:
-                    reference_context["learning_plan"] = {
-                        "id": lp.id,
-                        "date": lp.date,
-                        "topic_name": lp.topic_name,
-                        "sub_topic": lp.sub_topic,
-                        "classwork_activities": lp.classwork_activities,
-                        "assessment_task": lp.assessment_task,
-                        "teaching_aids": lp.teaching_aids,
-                        "learning_outcomes": lp.learning_outcomes,
-                    }
-            elif recording.chapter_id:
-                from app.models.learning_plan import LearningPlan
-                plans = session.query(LearningPlan).filter(LearningPlan.chapter_id == recording.chapter_id).all()
-                if plans:
-                    matched = None
-                    if recording.lecture_title:
-                        title_clean = recording.lecture_title.strip().lower()
-                        for p in plans:
-                            if p.sub_topic and p.sub_topic.strip().lower() == title_clean:
-                                matched = p
-                                break
-                            if p.topic_name and p.topic_name.strip().lower() == title_clean:
-                                matched = p
-                                break
-                    if matched:
-                        reference_context["learning_plan"] = {
-                            "id": matched.id,
-                            "date": matched.date,
-                            "topic_name": matched.topic_name,
-                            "sub_topic": matched.sub_topic,
-                            "classwork_activities": matched.classwork_activities,
-                            "assessment_task": matched.assessment_task,
-                            "teaching_aids": matched.teaching_aids,
-                            "learning_outcomes": matched.learning_outcomes,
-                        }
-                    else:
-                        reference_context["chapter_learning_plans"] = [
-                            {
-                                "id": p.id,
-                                "topic_name": p.topic_name,
-                                "sub_topic": p.sub_topic,
-                                "classwork_activities": p.classwork_activities,
-                                "learning_outcomes": p.learning_outcomes,
-                            }
-                            for p in plans
-                        ]
+            reference_context = build_reference_context(session, recording)
 
             report_data = analyze_recording(
                 fresh_url,
@@ -241,6 +250,10 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 report.score_breakdown = report_data["score_breakdown"]
                 report.quantitative_metrics = report_data["quantitative_metrics"]
                 report.raw_llm_response = report_data["raw_llm_response"]
+                report.rubric_version = report_data["rubric_version"]
+                # Feedback points at findings by position; after a re-score
+                # those positions hold different findings.
+                report.feedback.clear()
             else:
                 report = LLMReport(
                     recording_id=recording_id,
@@ -249,6 +262,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                     score_breakdown=report_data["score_breakdown"],
                     quantitative_metrics=report_data["quantitative_metrics"],
                     raw_llm_response=report_data["raw_llm_response"],
+                    rubric_version=report_data["rubric_version"],
                 )
                 session.add(report)
 

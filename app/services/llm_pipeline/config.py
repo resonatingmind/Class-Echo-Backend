@@ -16,6 +16,15 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 # scores stay comparable. Transcription may still fall back (see evaluator).
 SCORING_503_RETRY_DELAYS_S: tuple[float, ...] = (10, 30)
 
+# Stamped on every report. Bump it whenever the prompt, the rubric, the
+# response schema or the scoring model changes in a way that moves scores:
+# trends must only compare reports scored under the same version.
+#   1 — free-form JSON, string strengths/improvements (reports before this field)
+#   2 — schema-constrained output at temperature 0, strengths with evidence,
+#       improvements with a try-this script and one focus
+RUBRIC_VERSION = "2"
+SCORING_TEMPERATURE = 0.0
+
 # ── Transcript quality gate (see transcript_metrics.check_transcript) ──
 # Below this many words there is nothing to evaluate.
 MIN_TRANSCRIPT_WORDS = 30
@@ -102,6 +111,27 @@ Estimate from the transcript:
 - languages_detected: list of language names heard/used (e.g. ["Hindi", "English"])
 - code_switching_frequency: "none" | "low" | "medium" | "high"
 
+## Strengths
+Return exactly 2 strengths, even for a weak lecture. Each must be a genuine,
+specific thing this teacher did well in this lecture — never generic praise
+("good effort", "nice voice"). For each give:
+- area: the rubric dimension it belongs to
+- text: one sentence naming what the teacher did and why it worked
+- evidence: one short verbatim quote from the transcript that shows it
+
+## Improvements
+Return 1 to 3 improvements, most important first. Mark exactly one with
+is_focus = true: the single change that would help this teacher most next class.
+For each give:
+- area: the rubric dimension it belongs to
+- observation: what happened, in one plain sentence ("You moved on after asking a question without waiting.")
+- try_this: a concrete script or action for the next class that takes under
+  2 minutes — a sentence the teacher can say, or a step they can do. Match the
+  subject and class level. Write it in the language the teacher teaches in: if
+  the lecture is in Hinglish, write the script in Hinglish (Latin script).
+- why: one line on why it helps students
+Address the teacher as "you". No jargon.
+
 ## Output Format
 Respond ONLY with a valid JSON object. Never omit any field. Every score must be an integer. If you are uncertain, estimate conservatively. If a field cannot be determined, return 0 or an empty array instead of removing it. Return exactly the schema shown below. Do not wrap the JSON in markdown formatting (like ```json), do not include any explanatory prose before or after the JSON.
 
@@ -124,8 +154,12 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
     "code_switching_frequency": "<none|low|medium|high>"
   }},
   "overall_notes": "<2-3 sentence overall assessment of teaching effectiveness>",
-  "top_strengths": ["<specific strength 1>", "<specific strength 2>"],
-  "priority_improvements": ["<improvement 1>", "<improvement 2>", "<improvement 3>"],
+  "strengths": [
+    {{ "area": "<dimension>", "text": "<specific strength>", "evidence": "<short transcript quote>" }}
+  ],
+  "improvements": [
+    {{ "area": "<dimension>", "observation": "<what happened>", "try_this": "<script or action for next class>", "why": "<one line>", "is_focus": <true for exactly one> }}
+  ],
   "curriculum_coverage": {{
     "covered_concepts": [<list of covered concepts>],
     "missing_concepts": [<list of missed concepts>],
@@ -158,3 +192,126 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
   }}
 }}
 """.strip().strip()
+
+
+# ── Structured output schema for the scoring call ──────────────────────────
+# Passed as response_json_schema so Gemini can only return this shape. The
+# prompt above still describes each field; the schema enforces it.
+_DIMENSION_ENUM = list(SCORE_WEIGHTS)
+
+
+def _dimension_schema(max_score: int) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "score": {"type": "integer", "minimum": 0, "maximum": max_score},
+            "finding": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["score", "finding", "evidence"],
+    }
+
+
+def _int_object(*keys: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {k: {"type": "integer"} for k in keys},
+        "required": list(keys),
+    }
+
+
+_STRING_LIST = {"type": "array", "items": {"type": "string"}}
+
+SCORING_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "scores": {
+            "type": "object",
+            "properties": {dim: _dimension_schema(mx) for dim, mx in SCORE_WEIGHTS.items()},
+            "required": _DIMENSION_ENUM,
+        },
+        "total": {"type": "integer", "minimum": 0, "maximum": 100},
+        "quantitative": {
+            "type": "object",
+            "properties": {
+                "wpm_estimate": {"type": "integer"},
+                "filler_words_heard": {"type": "integer"},
+                "questions_asked": {"type": "integer"},
+                "languages_detected": _STRING_LIST,
+                "code_switching_frequency": {
+                    "type": "string", "enum": ["none", "low", "medium", "high"],
+                },
+            },
+            "required": [
+                "wpm_estimate", "filler_words_heard", "questions_asked",
+                "languages_detected", "code_switching_frequency",
+            ],
+        },
+        "overall_notes": {"type": "string"},
+        "strengths": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "area": {"type": "string", "enum": _DIMENSION_ENUM},
+                    "text": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["area", "text", "evidence"],
+            },
+        },
+        "improvements": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "area": {"type": "string", "enum": _DIMENSION_ENUM},
+                    "observation": {"type": "string"},
+                    "try_this": {"type": "string"},
+                    "why": {"type": "string"},
+                    "is_focus": {"type": "boolean"},
+                },
+                "required": ["area", "observation", "try_this", "why", "is_focus"],
+            },
+        },
+        "curriculum_coverage": {
+            "type": "object",
+            "properties": {
+                "covered_concepts": _STRING_LIST,
+                "missing_concepts": _STRING_LIST,
+                "coverage_percentage": {"type": "number", "minimum": 0, "maximum": 100},
+            },
+            "required": ["covered_concepts", "missing_concepts", "coverage_percentage"],
+        },
+        "accuracy_analysis": {
+            "type": "object",
+            "properties": {
+                "correct_explanations": _STRING_LIST,
+                "potential_inaccuracies": _STRING_LIST,
+            },
+            "required": ["correct_explanations", "potential_inaccuracies"],
+        },
+        "confidence_analysis": {
+            "type": "object",
+            "properties": {
+                "score": {"type": "integer"},
+                "hesitation_level": {"type": "string", "enum": ["Low", "Medium", "High"]},
+                "confidence_notes": {"type": "string"},
+            },
+            "required": ["score", "hesitation_level", "confidence_notes"],
+        },
+        "engagement_analysis": _int_object(
+            "score", "questions_asked", "examples_used", "student_checks", "interactive_prompts",
+        ),
+        "speech_analysis": _int_object("clarity_score", "fluency_score", "pace_score", "filler_density"),
+    },
+    "required": [
+        "scores", "total", "quantitative", "overall_notes", "strengths", "improvements",
+        "curriculum_coverage", "accuracy_analysis", "confidence_analysis",
+        "engagement_analysis", "speech_analysis",
+    ],
+}

@@ -15,6 +15,12 @@ class LLMReport(Base):
     score_breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     quantitative_metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     raw_llm_response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Which prompt/rubric scored this report (see llm_pipeline.config.RUBRIC_VERSION).
+    # Scores are only comparable within one version.
+    rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     recording: Mapped["Recording"] = relationship("Recording", back_populates="report")
+    feedback: Mapped[list["ReportFeedback"]] = relationship(
+        "ReportFeedback", back_populates="report", cascade="all, delete-orphan", passive_deletes=True,
+    )

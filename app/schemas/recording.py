@@ -1,8 +1,11 @@
 from datetime import datetime
-from pydantic import BaseModel, model_validator
+import enum
+
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm.attributes import set_committed_value
 from app.models.recording import RecordingStatus
+from app.models.report_feedback import FeedbackTarget, FeedbackVerdict
 from app.services.s3_service import sign_url
 from app.schemas.learning_plan import LearningPlanOut
 
@@ -92,6 +95,85 @@ class LearningObjectiveStatus(BaseModel):
     status: str = "missing"   # "achieved" | "partial" | "missing"
 
 
+class StrengthOut(BaseModel):
+    area: str | None = None
+    text: str
+    evidence: str = ""
+
+
+class ImprovementOut(BaseModel):
+    area: str | None = None
+    observation: str
+    try_this: str = ""
+    why: str = ""
+    is_focus: bool = False
+
+
+class FeedbackReason(str, enum.Enum):
+    score_too_low = "score_too_low"
+    score_too_high = "score_too_high"
+    quote_out_of_context = "quote_out_of_context"
+    transcript_wrong = "transcript_wrong"
+    class_type = "class_type"            # lab / test / revision
+    student_context = "student_context"  # students' situation not considered
+    other = "other"
+
+
+class ReportFeedbackOut(BaseModel):
+    target_type: FeedbackTarget
+    target_key: str
+    area: str | None = None
+    verdict: FeedbackVerdict
+    reasons: list[str] = []
+    comment: str | None = None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReportFeedbackIn(BaseModel):
+    target_type: FeedbackTarget
+    target_key: str = Field(min_length=1, max_length=50)
+    verdict: FeedbackVerdict
+    reasons: list[FeedbackReason] = []
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class _ReportView:
+    """Read-through wrapper over an LLMReport whose feedback isn't loaded, so
+    serialization sees None instead of triggering a lazy load. Unlike
+    set_committed_value it leaves the shared ORM instance untouched."""
+
+    feedback = None
+
+    def __init__(self, report):
+        self._report = report
+
+    def __getattr__(self, name):
+        return getattr(self._report, name)
+
+
+def _fill_findings(instance: "LLMReportOut", data) -> None:
+    raw = data.get("raw_llm_response") if isinstance(data, dict) else getattr(data, "raw_llm_response", None)
+    raw = raw if isinstance(raw, dict) else {}
+    if isinstance(raw.get("strengths"), list):
+        instance.strengths = [StrengthOut(**s) for s in raw["strengths"] if isinstance(s, dict) and s.get("text")]
+    if isinstance(raw.get("improvements"), list):
+        instance.improvements = [
+            ImprovementOut(**i) for i in raw["improvements"] if isinstance(i, dict) and i.get("observation")
+        ]
+
+    qm = instance.quantitative_metrics or {}
+    if not instance.strengths:
+        instance.strengths = [StrengthOut(text=str(s)) for s in qm.get("top_strengths") or [] if s][:2]
+    if not instance.improvements:
+        instance.improvements = [
+            ImprovementOut(observation=str(s), is_focus=i == 0)
+            for i, s in enumerate(x for x in qm.get("priority_improvements") or [] if x)
+        ][:3]
+
+
 class LLMReportOut(BaseModel):
     id: int
     recording_id: int
@@ -99,6 +181,13 @@ class LLMReportOut(BaseModel):
     teaching_quality_notes: str | None
     score_breakdown: dict | None
     quantitative_metrics: dict | None
+    rubric_version: str | None = None
+    # Structured findings. Reports scored before rubric 2 only have plain
+    # strings, which are lifted into this shape with the extra fields empty.
+    strengths: list[StrengthOut] = []
+    improvements: list[ImprovementOut] = []
+    # Only filled where the endpoint eager-loads it (the detail views).
+    feedback: list[ReportFeedbackOut] | None = None
     curriculum_coverage: CurriculumCoverageOut | None = None
     accuracy_analysis: AccuracyAnalysisOut | None = None
     chapter_info: ChapterInfoOut | None = None
@@ -112,8 +201,20 @@ class LLMReportOut(BaseModel):
     @classmethod
     def extract_rag_fields(cls, data, handler):
         """Extract RAG evaluation data from raw_llm_response when serializing from ORM."""
+        # feedback is a relationship: pin it to None unless already loaded, or
+        # reading it triggers an async lazy load (see RecordingOut above).
+        source = data
+        if not isinstance(data, dict):
+            try:
+                state = sa_inspect(data)
+            except Exception:
+                state = None
+            if state is not None and "feedback" in state.unloaded:
+                source = _ReportView(data)
+
         # First run normal validation
-        instance = handler(data)
+        instance = handler(source)
+        _fill_findings(instance, data)
 
         # Try to get raw_llm_response from the ORM model
         raw = None

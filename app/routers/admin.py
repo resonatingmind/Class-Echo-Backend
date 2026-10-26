@@ -2247,3 +2247,21 @@ async def _get_school_subject(subject_id: int, school_id: int, db: AsyncSession)
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
     return subject
+
+
+@router.get("/system/report-feedback")
+async def report_feedback_summary(
+    rubric_version: str | None = Query(None, description="Defaults to the current rubric; 'all' for every version"),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    """Teacher disagreement rate per rubric dimension and per reason.
+
+    The main signal for tuning the rubric: a dimension most teachers disagree
+    with is broken, not the teachers.
+    """
+    from app.services import report_feedback_service
+    from app.services.llm_pipeline.config import RUBRIC_VERSION
+
+    version = None if rubric_version == "all" else (rubric_version or RUBRIC_VERSION)
+    return await report_feedback_service.disagreement_summary(db, version)

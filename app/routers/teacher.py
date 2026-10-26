@@ -14,7 +14,15 @@ from app.models.recording import Recording, RecordingStatus
 from app.models.llm_report import LLMReport
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
-from app.schemas.recording import RecordingWithReport, LLMReportOut, RecordingUpdate
+from app.models.report_feedback import FeedbackTarget
+from app.schemas.recording import (
+    LLMReportOut,
+    RecordingUpdate,
+    RecordingWithReport,
+    ReportFeedbackIn,
+    ReportFeedbackOut,
+)
+from app.services import report_feedback_service
 from app.schemas.student import StudentOut
 from app.schemas.teacher import (
     TeacherOut,
@@ -895,6 +903,7 @@ async def get_teacher_recording(
             selectinload(Recording.teacher),
             selectinload(Recording.subject),
             selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.report).selectinload(LLMReport.feedback),
             selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
@@ -907,6 +916,49 @@ async def get_teacher_recording(
     if not recording:
         raise HTTPException(status_code=404, detail="Recording not found")
     return recording
+
+
+async def _own_report(db: AsyncSession, recording_id: int, teacher_id: int) -> LLMReport:
+    result = await db.execute(
+        select(LLMReport)
+        .join(Recording, Recording.id == LLMReport.recording_id)
+        .where(Recording.id == recording_id, Recording.teacher_id == teacher_id)
+    )
+    report = result.scalar_one_or_none()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@router.put("/recordings/{recording_id}/feedback", response_model=list[ReportFeedbackOut])
+async def put_report_feedback(
+    recording_id: int,
+    body: ReportFeedbackIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Agree or disagree with one finding. Never changes the score."""
+    report = await _own_report(db, recording_id, teacher.id)
+    try:
+        return await report_feedback_service.upsert_feedback(db, report, teacher.id, body)
+    except report_feedback_service.FeedbackTargetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.delete(
+    "/recordings/{recording_id}/feedback/{target_type}/{target_key}",
+    response_model=list[ReportFeedbackOut],
+)
+async def delete_report_feedback(
+    recording_id: int,
+    target_type: FeedbackTarget,
+    target_key: str,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Undo a 👍/👎."""
+    report = await _own_report(db, recording_id, teacher.id)
+    return await report_feedback_service.remove_feedback(db, report.id, target_type, target_key)
 
 
 @router.post("/recordings/{recording_id}/retry", response_model=RecordingWithReport)

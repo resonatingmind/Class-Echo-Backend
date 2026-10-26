@@ -26,8 +26,11 @@ def run_pipeline(audio_path: str | None, reference_context: dict | None = None) 
         "quantitative": { wpm_estimate, filler_words_heard, questions_asked,
                           languages_detected, code_switching_frequency },
         "overall_notes":         str,
-        "top_strengths":         [str],
+        "strengths":    [{ area, text, evidence }],
+        "improvements": [{ area, observation, try_this, why, is_focus }],  focus first
+        "top_strengths":         [str],  plain-text copies for older clients
         "priority_improvements": [str],
+        "rubric_version":        str,
     }
     """
     needs_audio = not (reference_context or {}).get("transcript")
