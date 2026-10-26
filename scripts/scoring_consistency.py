@@ -19,6 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from google.genai import errors as genai_errors  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
@@ -68,13 +69,22 @@ def main() -> int:
             runs = []
             for i in range(args.runs):
                 # evaluate() mutates the context it is given; each run gets a fresh copy.
-                result = evaluate(None, reference_context=dict(context))
+                try:
+                    result = evaluate(None, reference_context=dict(context))
+                except genai_errors.APIError as exc:
+                    # A busy model (503) after the evaluator's own retries should
+                    # cost one run, not the results gathered so far.
+                    print(f"  #{rec.id} run {i + 1}: skipped ({exc.code} {exc.status})")
+                    continue
                 runs.append({
                     "total": result["total"],
                     "scores": {d: result["scores"][d]["score"] for d in SCORE_WEIGHTS},
                     "focus_area": (result["improvements"][0]["area"] if result["improvements"] else None),
                 })
                 print(f"  #{rec.id} run {i + 1}: {result['total']}")
+            if len(runs) < 2:
+                print(f"#{rec.id:<5} fewer than 2 successful runs, left out of the summary\n")
+                continue
             totals = [r["total"] for r in runs]
             dims = {d: _spread([r["scores"][d] for r in runs]) for d in SCORE_WEIGHTS}
             focus_areas = {r["focus_area"] for r in runs}
@@ -94,6 +104,9 @@ def main() -> int:
                 f"  focus {'stable' if row['focus_stable'] else 'CHANGES: ' + ', '.join(map(str, focus_areas))}\n"
             )
 
+    if not results:
+        print("No recording had 2 successful runs; nothing to compare.")
+        return 1
     spreads = [r["spread"] for r in results]
     over = [r for r in results if r["spread"] > DRIFT_LIMIT]
     print("── Summary ──")
