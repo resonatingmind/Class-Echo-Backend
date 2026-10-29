@@ -1,6 +1,7 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, ForeignKey, Float, Enum, func
+from sqlalchemy import JSON, String, Text, DateTime, ForeignKey, Float, Enum, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -26,6 +27,9 @@ class Recording(Base):
     lecture_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcription: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Timestamped, speaker-labelled transcript (see llm_pipeline.segments); None
+    # for teacher-supplied transcripts and when the model gave no timings.
+    transcript_segments: Mapped[list | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
     cloudinary_url: Mapped[str] = mapped_column(String(500))
     cloudinary_public_id: Mapped[str] = mapped_column(String(255))
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

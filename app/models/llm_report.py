@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Float, Text, func
+from sqlalchemy import String, DateTime, ForeignKey, Float, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -18,9 +18,16 @@ class LLMReport(Base):
     # Which prompt/rubric scored this report (see llm_pipeline.config.RUBRIC_VERSION).
     # Scores are only comparable within one version.
     rubric_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # When the teacher first opened the finished report; the open-rate metric.
+    first_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # How many times the teacher played a clip from this report.
+    clip_plays: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     recording: Mapped["Recording"] = relationship("Recording", back_populates="report")
+    self_rating: Mapped["SelfRating | None"] = relationship(
+        "SelfRating", back_populates="report", uselist=False, cascade="all, delete-orphan", passive_deletes=True,
+    )
     feedback: Mapped[list["ReportFeedback"]] = relationship(
         "ReportFeedback", back_populates="report", cascade="all, delete-orphan", passive_deletes=True,
     )

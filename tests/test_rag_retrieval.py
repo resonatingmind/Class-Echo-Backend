@@ -258,8 +258,10 @@ async def test_process_recording_with_rag(subject, teacher_user):
         [FakeEmbedding([0.05] * 768)]
     )
     mock_genai_client.models.generate_content.side_effect = [
-        # First call is transcription
-        FakeGeminiResponse(TRANSCRIPT),
+        # First call is transcription, as timestamped segments
+        FakeGeminiResponse(json.dumps({"segments": [
+            {"start": "00:00", "end": "00:30", "speaker": "teacher", "text": TRANSCRIPT},
+        ]})),
         # Second call is evaluation
         FakeGeminiResponse(
             json.dumps({
@@ -301,6 +303,7 @@ async def test_process_recording_with_rag(subject, teacher_user):
         assert recording.status == "completed"
         assert recording.processing_step is None
         assert recording.transcription == TRANSCRIPT
+        assert recording.transcript_segments[0]["speaker"] == "teacher"
         
         # Reload and assert report details
         from sqlalchemy.orm import selectinload

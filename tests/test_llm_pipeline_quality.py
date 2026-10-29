@@ -212,9 +212,9 @@ def _run_task_on(session, rec, analyse_error):
         with sessionmaker(bind=engine)() as s:
             return s.get(Recording, rec.id).processing_step
 
-    def fake_transcribe(_path):
+    def fake_transcribe(_path, _duration=None):
         seen["transcribing"] = step_now()
-        return LESSON
+        return LESSON, None
 
     def fake_analyse(*_a, **_k):
         seen["analysing"] = step_now()
@@ -223,7 +223,7 @@ def _run_task_on(session, rec, analyse_error):
     with patch("sqlalchemy.create_engine", return_value=engine), \
          patch("app.services.s3_service.sign_url", return_value=None), \
          patch("app.services.llm._download_audio", return_value="/nonexistent.mp3"), \
-         patch("app.services.llm_pipeline.evaluator.transcribe_audio", side_effect=fake_transcribe), \
+         patch("app.services.llm_pipeline.evaluator.transcribe_audio_segments", side_effect=fake_transcribe), \
          patch.object(llm_tasks, "analyze_recording", side_effect=fake_analyse), \
          pytest.raises(type(analyse_error)):
         llm_tasks.process_recording.run(rec.id, rec.cloudinary_url)
@@ -293,9 +293,9 @@ def test_no_focus_marked_defaults_to_first_and_unknown_area_is_dropped():
         "strengths": [{"area": "verbal_clarity", "text": "s1", "evidence": "q"}, {"text": ""}],
     })
     assert result["improvements"] == [
-        {"area": None, "observation": "a", "try_this": "", "why": "", "is_focus": True},
+        {"area": None, "observation": "a", "try_this": "", "why": "", "is_focus": True, "segment_id": None},
     ]
-    assert result["strengths"] == [{"area": "verbal_clarity", "text": "s1", "evidence": "q"}]
+    assert result["strengths"] == [{"area": "verbal_clarity", "text": "s1", "evidence": "q", "segment_id": None}]
     assert result["top_strengths"] == ["s1"]
 
 
@@ -329,3 +329,115 @@ def test_report_out_prefers_structured_findings():
     assert out.strengths[0].evidence == "q"
     assert out.improvements[0].try_this == "t"
     assert out.rubric_version == "2"
+
+
+# ── Timestamped segments (phase 5) ───────────────────────────────────────────
+
+from app.services.llm_pipeline import segments as seg  # noqa: E402
+
+SEGMENTS = [
+    {"id": 0, "start": 0.0, "end": 8.0, "speaker": "teacher", "text": "Today we start linear equations. What is a variable?"},
+    {"id": 1, "start": 8.0, "end": 10.0, "speaker": "student", "text": "A letter? Like x?"},
+    {"id": 2, "start": 10.0, "end": 20.0, "speaker": "teacher", "text": "Yes, x stands for an unknown number, um, any number."},
+]
+
+
+def test_parse_timestamp_accepts_clock_and_numbers():
+    assert seg.parse_timestamp("04:31") == 271
+    assert seg.parse_timestamp("1:02:07") == 3727
+    assert seg.parse_timestamp("12.5") == 12.5
+    assert seg.parse_timestamp(90) == 90.0
+    assert seg.parse_timestamp("soon") is None
+    assert seg.parse_timestamp(-3) is None
+
+
+def test_normalize_segments_cleans_order_speakers_and_bounds():
+    out = seg.normalize_segments({"segments": [
+        {"start": "00:05", "end": "00:09", "speaker": "teacher", "text": " Hello class "},
+        {"start": "00:03", "end": "00:02", "speaker": "chorus", "text": "Good morning"},
+        {"start": "00:20", "end": "00:25", "speaker": "student", "text": ""},
+        {"start": "never", "end": "00:30", "speaker": "student", "text": "lost"},
+        {"start": "09:00", "end": "09:05", "speaker": "student", "text": "past the end"},
+    ]}, duration_seconds=60)
+    assert out == [
+        {"id": 0, "start": 5.0, "end": 9.0, "speaker": "teacher", "text": "Hello class"},
+        # Earlier time pinned forward, end fixed, unknown speaker -> teacher.
+        {"id": 1, "start": 5.0, "end": 5.0, "speaker": "teacher", "text": "Good morning"},
+    ]
+
+
+def test_metrics_with_speakers_count_only_teacher_questions():
+    text = seg.join_segments(SEGMENTS)
+    plain = compute_metrics(text, 600)
+    split = compute_metrics(text, 600, SEGMENTS)
+    assert plain["questions"] == 3
+    assert split["questions"] == 1
+    assert split["teacher_talk_share"] == 0.9
+    assert split["word_count"] == plain["word_count"]
+
+
+def _audio_ref():
+    return MagicMock(uri="u", mime_type="audio/mpeg")
+
+
+def test_segmented_transcription_returns_text_and_segments():
+    client = MagicMock()
+    client.models.generate_content.return_value = _Resp(json.dumps({"segments": [
+        {"start": "00:00", "end": "00:08", "speaker": "teacher", "text": "Hello"},
+        {"start": "00:08", "end": "00:10", "speaker": "student", "text": "Hi"},
+    ]}))
+    with patch.object(evaluator, "_get_client", return_value=client), \
+            patch.object(evaluator, "_upload_and_wait", return_value=_audio_ref()):
+        text, segments = evaluator.transcribe_audio_segments("/x.mp3", 600)
+    assert text == "Hello Hi"
+    assert [s["speaker"] for s in segments] == ["teacher", "student"]
+    config = client.models.generate_content.call_args.kwargs["config"]
+    assert config.response_json_schema == seg.SEGMENTS_RESPONSE_SCHEMA
+
+
+def test_unreadable_segments_fall_back_to_plain_transcript():
+    truncated = json.dumps({"segments": [{"start": "00:00", "text": "cut"}]})[:-12]
+    client = MagicMock()
+    client.models.generate_content.side_effect = [_Resp(truncated), _Resp("Plain words")]
+    with patch.object(evaluator, "_get_client", return_value=client), \
+            patch.object(evaluator, "_upload_and_wait", return_value=_audio_ref()):
+        text, segments = evaluator.transcribe_audio_segments("/x.mp3")
+    assert (text, segments) == ("Plain words", None)
+
+
+def test_evaluation_with_segments_cites_moments():
+    llm = json.loads(_llm_json())
+    llm["scores"]["student_engagement"].update(evidence=["What is a variable?", "Like x?"], evidence_segments=[0, 99])
+    llm["strengths"] = [{"area": "verbal_clarity", "text": "s", "evidence": "q", "segment_id": 2}]
+    llm["improvements"] = [
+        {"area": "closure_recap", "observation": "o", "try_this": "t", "why": "w", "is_focus": True, "segment_id": 7},
+    ]
+    llm["highlights"] = {
+        "best_moment": {"segment_id": 2, "note": "clear"},
+        "moment_to_rethink": {"segment_id": 42, "note": "bad id"},
+    }
+    client = MagicMock()
+    client.models.generate_content.return_value = _Resp(json.dumps(llm))
+    context = {"transcript": seg.join_segments(SEGMENTS), "transcript_segments": SEGMENTS, "duration_seconds": 600}
+    with patch.object(evaluator, "_get_client", return_value=client):
+        result = evaluator.evaluate(None, context)
+
+    prompt = client.models.generate_content.call_args.kwargs["contents"]
+    assert "[1] 00:08 STUDENT: A letter? Like x?" in prompt
+    assert "## Citing the moment" in prompt
+    assert "Questions asked by the teacher: 1" in prompt
+    assert result["scores"]["student_engagement"]["evidence_starts"] == [0.0, None]
+    assert "evidence_segments" not in result["scores"]["student_engagement"]
+    assert (result["strengths"][0]["segment_id"], result["strengths"][0]["start"]) == (2, 10.0)
+    assert (result["improvements"][0]["segment_id"], result["improvements"][0]["start"]) == (None, None)
+    assert result["highlights"] == {"best_moment": {"segment_id": 2, "start": 10.0, "note": "clear"}}
+    assert result["quantitative"]["teacher_talk_share"] == 0.9
+
+
+def test_evaluation_without_segments_has_no_citation_section():
+    client = MagicMock()
+    client.models.generate_content.return_value = _Resp(_llm_json())
+    with patch.object(evaluator, "_get_client", return_value=client):
+        result = evaluator.evaluate(None, {"transcript": LESSON, "duration_seconds": 300})
+    assert "## Citing the moment" not in client.models.generate_content.call_args.kwargs["contents"]
+    assert result["highlights"] == {}

@@ -39,11 +39,12 @@ from app.models.email_log import EmailLog, EmailStatus
 from app.models.system_setting import SystemSetting
 from app.models.audit_log import AuditLog
 from app.models.report_feedback import ReportFeedback, FeedbackTarget, FeedbackVerdict
+from app.models.self_rating import SelfRating
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
     "Teacher", "Student", "Recording", "RecordingStatus", "LLMReport",
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
     "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
-    "SystemSetting", "AuditLog", "ReportFeedback", "FeedbackTarget", "FeedbackVerdict",
+    "SystemSetting", "AuditLog", "ReportFeedback", "FeedbackTarget", "FeedbackVerdict", "SelfRating",
 ]

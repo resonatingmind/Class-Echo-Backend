@@ -13,12 +13,21 @@ from google.genai import types
 from .config import (
     EVALUATION_PROMPT_TEMPLATE,
     GEMINI_MODEL,
+    HIGHLIGHT_KEYS,
     RUBRIC_VERSION,
+    SEGMENT_INSTRUCTIONS,
     SCORE_WEIGHTS,
     SCORING_503_RETRY_DELAYS_S,
     SCORING_RESPONSE_SCHEMA,
     SCORING_TEMPERATURE,
 )
+from .segments import (
+    SEGMENTS_RESPONSE_SCHEMA,
+    TRANSCRIBE_SEGMENTS_PROMPT,
+    join_segments,
+    normalize_segments,
+)
+from .segments import format_for_prompt as format_segments_for_prompt
 from .transcript_metrics import apply_metrics, compute_metrics, format_for_prompt
 
 logger = logging.getLogger(__name__)
@@ -102,7 +111,13 @@ def _call_gemini(
     if not reference_context:
         reference_context = {}
 
-    transcript = reference_context.get("transcript") or "N/A"
+    segments = reference_context.get("transcript_segments")
+    if segments:
+        transcript = format_segments_for_prompt(segments)
+        segment_instructions = SEGMENT_INSTRUCTIONS
+    else:
+        transcript = reference_context.get("transcript") or "N/A"
+        segment_instructions = ""
     summary = reference_context.get("chapter_summary") or "N/A"
     
     objectives_list = reference_context.get("learning_objectives") or []
@@ -156,6 +171,7 @@ def _call_gemini(
         must_cover_topics=must_cover,
         learning_plan_info=learning_plan_info,
         measured_facts=measured_facts or "Not available.",
+        segment_instructions=segment_instructions,
         retrieved_chunks=chunks_str
     )
 
@@ -232,6 +248,7 @@ def _normalize_strengths(items) -> list[dict]:
                 "area": _area(item.get("area")),
                 "text": text,
                 "evidence": str(item.get("evidence", "")).strip(),
+                "segment_id": item.get("segment_id"),
             })
     return out[:2]
 
@@ -249,6 +266,7 @@ def _normalize_improvements(items) -> list[dict]:
                 "try_this": str(item.get("try_this", "")).strip(),
                 "why": str(item.get("why", "")).strip(),
                 "is_focus": bool(item.get("is_focus")),
+                "segment_id": item.get("segment_id"),
             })
     out = out[:3]
     # Exactly one focus, listed first. The schema can't express "exactly one
@@ -325,17 +343,34 @@ def _validate_and_fix(result: dict) -> dict:
     return result
 
 
+_PLAIN_TRANSCRIBE_PROMPT = (
+    "You are an expert transcriber. Transcribe the following audio recording exactly as spoken. "
+    "Do not summarize or omit anything. Capture all content accurately, including any code-switching "
+    "between Hindi and English (Hinglish) or other Indian regional languages."
+)
+
+
 def transcribe_audio(audio_path: str) -> str:
-    """Upload audio to Gemini Files API, request transcription, and clean up."""
+    """Plain transcript only; see transcribe_audio_segments."""
+    return transcribe_audio_segments(audio_path)[0]
+
+
+def transcribe_audio_segments(
+    audio_path: str, duration_seconds: float | None = None,
+) -> tuple[str, list[dict] | None]:
+    """
+    Upload audio to Gemini Files API, transcribe it into timestamped,
+    speaker-labelled segments, and clean up.
+
+    Returns (plain transcript, segments). segments is None when the model's
+    segmented answer could not be read (most likely a very long lecture whose
+    JSON was cut off); the plain transcript is then requested instead, so a
+    recording never fails just because timestamps were unavailable.
+    """
     client = _get_client()
     file_ref = None
     try:
         file_ref = _upload_and_wait(client, audio_path)
-        prompt = (
-            "You are an expert transcriber. Transcribe the following audio recording exactly as spoken. "
-            "Do not summarize or omit anything. Capture all content accurately, including any code-switching "
-            "between Hindi and English (Hinglish) or other Indian regional languages."
-        )
         started = time.monotonic()
 
         # Try the primary model, then progressively older ones. A model that has
@@ -365,24 +400,44 @@ def transcribe_audio(audio_path: str) -> str:
                         thinking_level="low"
                     )
 
+                audio_part = types.Part.from_uri(
+                    file_uri=file_ref.uri,
+                    mime_type=file_ref.mime_type,
+                )
                 response = client.models.generate_content(
                     model=model,
-                    contents=[
-                        types.Part.from_uri(
-                            file_uri=file_ref.uri,
-                            mime_type=file_ref.mime_type,
-                        ),
-                        prompt,
-                    ],
-                    config=types.GenerateContentConfig(**config_kwargs),
+                    contents=[audio_part, TRANSCRIBE_SEGMENTS_PROMPT],
+                    config=types.GenerateContentConfig(
+                        **config_kwargs,
+                        response_mime_type="application/json",
+                        response_json_schema=SEGMENTS_RESPONSE_SCHEMA,
+                    ),
                 )
+                segments: list[dict] | None
+                try:
+                    segments = normalize_segments(_parse_response(response.text), duration_seconds) or None
+                except ValueError:
+                    segments = None
+                if segments:
+                    transcript = join_segments(segments)
+                else:
+                    logger.warning(
+                        "Segmented transcription from %s was unreadable; requesting a plain transcript",
+                        model,
+                    )
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[audio_part, _PLAIN_TRANSCRIBE_PROMPT],
+                        config=types.GenerateContentConfig(**config_kwargs),
+                    )
+                    transcript = response.text or ""
                 logger.info(
-                    "Transcription completed in %.1fs using model %s",
+                    "Transcription completed in %.1fs using model %s (%s)",
                     time.monotonic() - started,
                     model,
+                    f"{len(segments)} segments" if segments else "no segments",
                 )
 
-                transcript = response.text or ""
                 if not transcript.strip():
                     # An empty transcript makes every downstream score
                     # meaningless, and the evaluation prompt would silently be
@@ -393,7 +448,7 @@ def transcribe_audio(audio_path: str) -> str:
                         "this recording. Check that the audio contains audible "
                         "speech."
                     )
-                return transcript
+                return transcript, segments
             except Exception as exc:
                 if model == unique_models[-1]:
                     raise
@@ -413,6 +468,43 @@ def transcribe_audio(audio_path: str) -> str:
                 pass
 
 
+def _attach_segments(result: dict, segments: list[dict] | None) -> None:
+    """
+    Turn the model's segment citations into times the report can play.
+
+    Each strength and improvement gets segment_id and start (seconds) or None;
+    each dimension gets evidence_starts parallel to evidence; highlights keep
+    only entries that cite a real segment. Without segments everything is None
+    or empty, so the report simply shows no play chips.
+    """
+    by_id = {s["id"]: s for s in segments or []}
+
+    def resolve(value) -> tuple[int | None, float | None]:
+        seg = by_id.get(value) if isinstance(value, int) and not isinstance(value, bool) else None
+        return (seg["id"], seg["start"]) if seg else (None, None)
+
+    for entry in result.get("scores", {}).values():
+        cited = entry.pop("evidence_segments", None) or []
+        starts = []
+        for i in range(len(entry.get("evidence", []))):
+            starts.append(resolve(cited[i])[1] if i < len(cited) else None)
+        entry["evidence_starts"] = starts
+
+    for item in (*result.get("strengths", []), *result.get("improvements", [])):
+        item["segment_id"], item["start"] = resolve(item.get("segment_id"))
+
+    highlights = {}
+    raw = result.get("highlights") if isinstance(result.get("highlights"), dict) else {}
+    for key in HIGHLIGHT_KEYS:
+        h = raw.get(key)
+        if not isinstance(h, dict):
+            continue
+        seg_id, start = resolve(h.get("segment_id"))
+        if seg_id is not None:
+            highlights[key] = {"segment_id": seg_id, "start": start, "note": str(h.get("note", "")).strip()}
+    result["highlights"] = highlights
+
+
 def evaluate(audio_path: str | None, reference_context: dict | None = None) -> dict:
     """
     Evaluate the lecture transcript and reference context using Gemini.
@@ -427,14 +519,20 @@ def evaluate(audio_path: str | None, reference_context: dict | None = None) -> d
                 "No transcript in reference_context and no audio file to transcribe."
             )
         logger.info("Transcript not found in reference_context. Transcribing audio first...")
-        reference_context["transcript"] = transcribe_audio(audio_path)
+        transcript, segments = transcribe_audio_segments(
+            audio_path, reference_context.get("duration_seconds"),
+        )
+        reference_context["transcript"] = transcript
+        reference_context["transcript_segments"] = segments
 
     duration = reference_context.get("duration_seconds")
-    metrics = compute_metrics(reference_context["transcript"], duration)
+    segments = reference_context.get("transcript_segments") or None
+    metrics = compute_metrics(reference_context["transcript"], duration, segments)
 
     raw = _call_gemini(client, reference_context, format_for_prompt(metrics, duration))
     parsed = _parse_response(raw)
     result = apply_metrics(_validate_and_fix(parsed), metrics)
+    _attach_segments(result, segments)
     # Recorded so a report can always be traced to the model and rubric that scored it.
     result["scoring_model"] = GEMINI_MODEL
     result["rubric_version"] = RUBRIC_VERSION

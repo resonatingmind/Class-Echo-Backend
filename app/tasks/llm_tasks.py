@@ -114,6 +114,7 @@ def build_reference_context(session, recording) -> dict:
         reference_context = {}
     if recording.transcription:
         reference_context["transcript"] = recording.transcription
+        reference_context["transcript_segments"] = recording.transcript_segments or None
     reference_context["duration_seconds"] = recording.duration_seconds
 
     if recording.learning_plan_id:
@@ -206,7 +207,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
 
             from app.services.s3_service import sign_url
             from app.services.llm import _download_audio
-            from app.services.llm_pipeline.evaluator import transcribe_audio
+            from app.services.llm_pipeline.evaluator import transcribe_audio_segments
             from app.services.llm_pipeline.transcript_metrics import (
                 TranscriptTooShortError,
                 check_transcript,
@@ -220,7 +221,9 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
             if not recording.transcription:
                 logger.info(f"Recording {recording_id} is missing transcription. Transcribing audio now...")
                 tmp_audio = _download_audio(fresh_url)
-                recording.transcription = transcribe_audio(tmp_audio)
+                recording.transcription, recording.transcript_segments = transcribe_audio_segments(
+                    tmp_audio, recording.duration_seconds,
+                )
                 session.commit()
 
             try:
@@ -229,6 +232,7 @@ def process_recording(self, recording_id: int, cloudinary_url: str):
                 # Drop the unusable transcript so Retry analysis transcribes
                 # the audio again instead of re-failing on the stored text.
                 recording.transcription = None
+                recording.transcript_segments = None
                 session.commit()
                 raise
 

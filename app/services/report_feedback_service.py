@@ -7,6 +7,7 @@ from app.models.llm_report import LLMReport
 from app.models.recording import Recording
 from app.models.report_feedback import FeedbackTarget, FeedbackVerdict, ReportFeedback
 from app.models.school import School
+from app.models.self_rating import SelfRating
 from app.models.teacher import Teacher
 from app.schemas.recording import LLMReportOut, ReportFeedbackIn
 from app.services.llm_pipeline.config import SCORE_WEIGHTS
@@ -89,6 +90,61 @@ async def remove_feedback(
     return await list_feedback(db, report_id)
 
 
+def _rate(part: int, whole: int) -> float | None:
+    return round(part / whole, 3) if whole else None
+
+
+async def _adoption(db: AsyncSession, report_filter: list, feedback_rows: list[ReportFeedback]) -> dict:
+    """The roadmap's success numbers: are reports opened, try-this found
+    useful, clips played and the self-rating step used."""
+    reports = (await db.execute(
+        select(
+            LLMReport.first_opened_at,
+            LLMReport.clip_plays,
+            LLMReport.raw_llm_response["improvements"],
+            Recording.processed_at,
+        )
+        .join(Recording, Recording.id == LLMReport.recording_id)
+        .where(*report_filter)
+    )).all()
+
+    opened = [r for r in reports if r.first_opened_at]
+    hours_to_open = sorted(
+        (r.first_opened_at - r.processed_at).total_seconds() / 3600
+        for r in opened if r.processed_at and r.first_opened_at >= r.processed_at
+    )
+    try_this_total = sum(
+        sum(1 for i in (r[2] or []) if isinstance(i, dict) and i.get("try_this")) for r in reports
+    )
+    try_this_useful = sum(
+        1 for f in feedback_rows
+        if f.target_type == FeedbackTarget.improvement.value and f.verdict == FeedbackVerdict.agree.value
+    )
+
+    ratings = (await db.execute(
+        select(SelfRating.skipped, func.count())
+        .join(LLMReport, LLMReport.id == SelfRating.report_id)
+        .where(*report_filter)
+        .group_by(SelfRating.skipped)
+    )).all()
+    given = sum(n for skipped, n in ratings if not skipped)
+    skipped = sum(n for skipped, n in ratings if skipped)
+
+    return {
+        "reports_opened": len(opened),
+        "open_rate": _rate(len(opened), len(reports)),
+        "median_hours_to_open": round(hours_to_open[len(hours_to_open) // 2], 1) if hours_to_open else None,
+        "try_this_total": try_this_total,
+        "try_this_useful": try_this_useful,
+        "try_this_useful_rate": _rate(try_this_useful, try_this_total),
+        "reports_with_clip_play": sum(1 for r in opened if r.clip_plays),
+        "clip_play_rate": _rate(sum(1 for r in opened if r.clip_plays), len(opened)),
+        "self_ratings_given": given,
+        "self_ratings_skipped": skipped,
+        "self_rating_completion": _rate(given, given + skipped),
+    }
+
+
 async def disagreement_summary(db: AsyncSession, rubric_version: str | None) -> dict:
     """Disagreement rate per dimension and per reason, across all schools.
 
@@ -154,6 +210,7 @@ async def disagreement_summary(db: AsyncSession, rubric_version: str | None) -> 
     )).all()
 
     return {
+        "adoption": await _adoption(db, report_filter, rows),
         "rubric_version": rubric_version,
         "alert_rate": DISAGREEMENT_ALERT_RATE,
         "reports_total": reports_total,

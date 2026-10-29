@@ -1,8 +1,9 @@
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 
 from app.models.chapter import Chapter
@@ -15,12 +16,15 @@ from app.models.llm_report import LLMReport
 from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.models.report_feedback import FeedbackTarget
+from app.models.self_rating import SelfRating
 from app.schemas.recording import (
     LLMReportOut,
     RecordingUpdate,
     RecordingWithReport,
     ReportFeedbackIn,
     ReportFeedbackOut,
+    SelfRatingIn,
+    SelfRatingOut,
 )
 from app.services import report_feedback_service
 from app.schemas.student import StudentOut
@@ -816,6 +820,7 @@ async def upload_recording(
         if description is not None:
             existing_recording.description = description or None
         existing_recording.transcription = transcription or None
+        existing_recording.transcript_segments = None
         existing_recording.cloudinary_url = upload_result["url"]
         existing_recording.cloudinary_public_id = upload_result["public_id"]
         existing_recording.duration_seconds = (
@@ -904,6 +909,7 @@ async def get_teacher_recording(
             selectinload(Recording.subject),
             selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.report).selectinload(LLMReport.feedback),
+            selectinload(Recording.report).selectinload(LLMReport.self_rating),
             selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
@@ -915,7 +921,54 @@ async def get_teacher_recording(
     recording = result.scalar_one_or_none()
     if not recording:
         raise HTTPException(status_code=404, detail="Recording not found")
+    # The teacher opening a finished report is the report open-rate metric.
+    if recording.report and recording.report.first_opened_at is None:
+        recording.report.first_opened_at = datetime.utcnow()
+        await db.commit()
     return recording
+
+
+@router.put("/recordings/{recording_id}/self-rating", response_model=SelfRatingOut, status_code=201)
+async def put_self_rating(
+    recording_id: int,
+    body: SelfRatingIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """The teacher's own view before the report is revealed, or a one-tap skip.
+
+    Given once per report: after the reveal it would no longer be the
+    teacher's unprompted view.
+    """
+    report = await _own_report(db, recording_id, teacher.id)
+    existing = await db.execute(select(SelfRating).where(SelfRating.report_id == report.id))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Already rated")
+    rating = SelfRating(
+        report_id=report.id,
+        teacher_id=teacher.id,
+        ratings=body.ratings,
+        reflection=(body.reflection or "").strip() or None,
+        skipped=body.skipped,
+    )
+    db.add(rating)
+    await db.commit()
+    await db.refresh(rating)
+    return rating
+
+
+@router.post("/recordings/{recording_id}/clip-plays", status_code=204)
+async def record_clip_play(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Count a clip played from the report (the clip-usage metric)."""
+    report = await _own_report(db, recording_id, teacher.id)
+    await db.execute(
+        update(LLMReport).where(LLMReport.id == report.id).values(clip_plays=LLMReport.clip_plays + 1)
+    )
+    await db.commit()
 
 
 async def _own_report(db: AsyncSession, recording_id: int, teacher_id: int) -> LLMReport:

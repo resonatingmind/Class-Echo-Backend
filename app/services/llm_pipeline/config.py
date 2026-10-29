@@ -21,7 +21,8 @@ SCORING_503_RETRY_DELAYS_S: tuple[float, ...] = (10, 30)
 # trends must only compare reports scored under the same version.
 #   1 — free-form JSON, string strengths/improvements (reports before this field)
 #   2 — schema-constrained output at temperature 0, strengths with evidence,
-#       improvements with a try-this script and one focus
+#       improvements with a try-this script and one focus; segment citations
+#       and speaker-aware question counts when the transcript is segmented
 RUBRIC_VERSION = "2"
 SCORING_TEMPERATURE = 0.0
 
@@ -131,6 +132,7 @@ For each give:
   the lecture is in Hinglish, write the script in Hinglish (Latin script).
 - why: one line on why it helps students
 Address the teacher as "you". No jargon.
+{segment_instructions}
 
 ## Output Format
 Respond ONLY with a valid JSON object. Never omit any field. Every score must be an integer. If you are uncertain, estimate conservatively. If a field cannot be determined, return 0 or an empty array instead of removing it. Return exactly the schema shown below. Do not wrap the JSON in markdown formatting (like ```json), do not include any explanatory prose before or after the JSON.
@@ -199,6 +201,26 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
 # prompt above still describes each field; the schema enforces it.
 _DIMENSION_ENUM = list(SCORE_WEIGHTS)
 
+# The report's highlights strip, in display order.
+HIGHLIGHT_KEYS = ("best_moment", "moment_to_rethink", "best_interaction")
+
+# Filled into {segment_instructions} only when the transcript is segmented.
+SEGMENT_INSTRUCTIONS = """
+## Citing the moment
+The transcript is split into numbered segments: [id] MM:SS SPEAKER: text.
+TEACHER lines are the teacher; STUDENT lines are students. Judge the teacher on
+TEACHER lines; use STUDENT lines to judge engagement (who answered, how often).
+- For every evidence quote, also give the id of the segment it comes from, in
+  evidence_segments (same order as evidence).
+- For every strength and improvement, give segment_id: the segment that best
+  shows it.
+- highlights: pick best_moment (the strongest teaching moment),
+  moment_to_rethink (the one moment most worth doing differently) and
+  best_interaction (the best exchange with students; use a STUDENT segment's
+  neighbour if needed). Each has segment_id and a one-line note to the teacher.
+Only cite ids that appear in the transcript.
+"""
+
 
 def _dimension_schema(max_score: int) -> dict:
     return {
@@ -207,6 +229,9 @@ def _dimension_schema(max_score: int) -> dict:
             "score": {"type": "integer", "minimum": 0, "maximum": max_score},
             "finding": {"type": "string"},
             "evidence": {"type": "array", "items": {"type": "string"}},
+            # Segment id of each evidence quote, same order. Only when the
+            # transcript is segmented.
+            "evidence_segments": {"type": "array", "items": {"type": "integer"}},
         },
         "required": ["score", "finding", "evidence"],
     }
@@ -258,6 +283,7 @@ SCORING_RESPONSE_SCHEMA: dict = {
                     "area": {"type": "string", "enum": _DIMENSION_ENUM},
                     "text": {"type": "string"},
                     "evidence": {"type": "string"},
+                    "segment_id": {"type": "integer"},
                 },
                 "required": ["area", "text", "evidence"],
             },
@@ -274,6 +300,7 @@ SCORING_RESPONSE_SCHEMA: dict = {
                     "try_this": {"type": "string"},
                     "why": {"type": "string"},
                     "is_focus": {"type": "boolean"},
+                    "segment_id": {"type": "integer"},
                 },
                 "required": ["area", "observation", "try_this", "why", "is_focus"],
             },
@@ -303,6 +330,18 @@ SCORING_RESPONSE_SCHEMA: dict = {
                 "confidence_notes": {"type": "string"},
             },
             "required": ["score", "hesitation_level", "confidence_notes"],
+        },
+        # Only when the transcript is segmented.
+        "highlights": {
+            "type": "object",
+            "properties": {
+                key: {
+                    "type": "object",
+                    "properties": {"segment_id": {"type": "integer"}, "note": {"type": "string"}},
+                    "required": ["segment_id", "note"],
+                }
+                for key in HIGHLIGHT_KEYS
+            },
         },
         "engagement_analysis": _int_object(
             "score", "questions_asked", "examples_used", "student_checks", "interactive_prompts",

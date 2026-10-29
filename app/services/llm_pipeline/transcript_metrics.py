@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from .segments import teacher_talk_share, teacher_text
 from .config import (
     MIN_TRANSCRIPT_WORDS,
     MIN_TRANSCRIPT_WPM,
@@ -77,17 +78,21 @@ def check_transcript(transcript: str | None, duration_seconds: float | None) -> 
             )
 
 
-def compute_metrics(transcript: str, duration_seconds: float | None) -> dict:
+def compute_metrics(
+    transcript: str, duration_seconds: float | None, segments: list[dict] | None = None,
+) -> dict:
     """
     Return the countable metrics for a transcript.
 
     wpm is 0 when the duration is unknown; the detail screen renders 0 as "—".
-    questions counts every question mark, so student questions are included
-    until the transcript separates speakers.
+    With speaker-labelled segments, fillers and questions count the teacher's
+    speech only and the teacher's share of talk time is measured; without
+    them every question mark counts, students' included.
     """
+    teacher = teacher_text(segments) if segments else transcript
     words = count_words(transcript)
-    fillers = len(_FILLER_RE.findall(transcript))
-    questions = len(_QUESTION_RE.findall(transcript))
+    fillers = len(_FILLER_RE.findall(teacher))
+    questions = len(_QUESTION_RE.findall(teacher))
     wpm = round(words / (duration_seconds / 60)) if duration_seconds and duration_seconds > 0 else 0
     return {
         "word_count": words,
@@ -96,6 +101,9 @@ def compute_metrics(transcript: str, duration_seconds: float | None) -> dict:
         "questions": questions,
         # Fillers per 100 words, so long and short lectures compare fairly.
         "filler_density": round(fillers / words * 100) if words else 0,
+        "speakers_known": bool(segments),
+        # Teacher's share of spoken time, 0-1; None without segments.
+        "teacher_talk_share": teacher_talk_share(segments) if segments else None,
     }
 
 
@@ -106,6 +114,7 @@ def apply_metrics(result: dict, metrics: dict) -> dict:
     quant["filler_words_heard"] = metrics["filler_words"]
     quant["questions_asked"] = metrics["questions"]
     quant["word_count"] = metrics["word_count"]
+    quant["teacher_talk_share"] = metrics.get("teacher_talk_share")
 
     result.setdefault("engagement_analysis", {})["questions_asked"] = metrics["questions"]
     result.setdefault("speech_analysis", {})["filler_density"] = metrics["filler_density"]
@@ -116,10 +125,19 @@ def format_for_prompt(metrics: dict, duration_seconds: float | None) -> str:
     """Measured facts handed to the evaluator, so its prose agrees with the numbers."""
     duration = f"{duration_seconds / 60:.1f} minutes" if duration_seconds else "unknown"
     wpm = f"{metrics['wpm']} words per minute" if metrics["wpm"] else "unknown (no duration)"
-    return (
-        f"Recording duration: {duration}\n"
-        f"Transcript length: {metrics['word_count']} words\n"
-        f"Speaking rate: {wpm}\n"
-        f"Filler words counted: {metrics['filler_words']}\n"
-        f"Question marks in transcript (teacher and students): {metrics['questions']}"
-    )
+    lines = [
+        f"Recording duration: {duration}",
+        f"Transcript length: {metrics['word_count']} words",
+        f"Speaking rate: {wpm}",
+        f"Filler words counted: {metrics['filler_words']}",
+    ]
+    if metrics.get("speakers_known"):
+        share = metrics.get("teacher_talk_share")
+        lines.append(f"Questions asked by the teacher: {metrics['questions']}")
+        lines.append(
+            f"Teacher's share of talk time: {round(share * 100)}%" if share is not None
+            else "Teacher's share of talk time: unknown"
+        )
+    else:
+        lines.append(f"Question marks in transcript (teacher and students): {metrics['questions']}")
+    return "\n".join(lines)

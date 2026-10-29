@@ -6,6 +6,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm.attributes import set_committed_value
 from app.models.recording import RecordingStatus
 from app.models.report_feedback import FeedbackTarget, FeedbackVerdict
+from app.models.self_rating import SELF_RATING_AREAS
 from app.services.s3_service import sign_url
 from app.schemas.learning_plan import LearningPlanOut
 
@@ -34,6 +35,7 @@ class RecordingOut(BaseModel):
     lecture_title: str | None = None
     description: str | None
     transcription: str | None = None
+    transcript_segments: list[dict] | None = None
     cloudinary_url: str
     duration_seconds: float | None
     status: RecordingStatus
@@ -99,6 +101,9 @@ class StrengthOut(BaseModel):
     area: str | None = None
     text: str
     evidence: str = ""
+    # The cited transcript moment; None without a segmented transcript.
+    segment_id: int | None = None
+    start: float | None = None
 
 
 class ImprovementOut(BaseModel):
@@ -107,6 +112,44 @@ class ImprovementOut(BaseModel):
     try_this: str = ""
     why: str = ""
     is_focus: bool = False
+    segment_id: int | None = None
+    start: float | None = None
+
+
+class HighlightOut(BaseModel):
+    segment_id: int
+    start: float
+    note: str = ""
+
+
+class SelfRatingIn(BaseModel):
+    # {area: 1-5}; areas from models.self_rating.SELF_RATING_AREAS. Empty when skipped.
+    ratings: dict[str, int] = {}
+    reflection: str | None = Field(default=None, max_length=500)
+    skipped: bool = False
+
+    @model_validator(mode="after")
+    def _check(self) -> "SelfRatingIn":
+        unknown = set(self.ratings) - set(SELF_RATING_AREAS)
+        if unknown:
+            raise ValueError(f"Unknown areas: {', '.join(sorted(unknown))}")
+        if any(not 1 <= v <= 5 for v in self.ratings.values()):
+            raise ValueError("Ratings must be 1 to 5")
+        if not self.skipped and not self.ratings:
+            raise ValueError("Rate at least one area, or skip")
+        if self.skipped:
+            self.ratings, self.reflection = {}, None
+        return self
+
+
+class SelfRatingOut(BaseModel):
+    ratings: dict[str, int] = {}
+    reflection: str | None = None
+    skipped: bool = False
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class FeedbackReason(str, enum.Enum):
@@ -140,17 +183,22 @@ class ReportFeedbackIn(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+# Report relationships that only some endpoints eager-load.
+_OPTIONAL_REPORT_RELATIONS = ("feedback", "self_rating")
+
+
 class _ReportView:
-    """Read-through wrapper over an LLMReport whose feedback isn't loaded, so
-    serialization sees None instead of triggering a lazy load. Unlike
+    """Read-through wrapper over an LLMReport that shows its unloaded optional
+    relationships as None instead of triggering a lazy load. Unlike
     set_committed_value it leaves the shared ORM instance untouched."""
 
-    feedback = None
-
-    def __init__(self, report):
+    def __init__(self, report, hidden: set[str]):
         self._report = report
+        self._hidden = hidden
 
     def __getattr__(self, name):
+        if name in self._hidden:
+            return None
         return getattr(self._report, name)
 
 
@@ -163,6 +211,11 @@ def _fill_findings(instance: "LLMReportOut", data) -> None:
         instance.improvements = [
             ImprovementOut(**i) for i in raw["improvements"] if isinstance(i, dict) and i.get("observation")
         ]
+    if isinstance(raw.get("highlights"), dict):
+        instance.highlights = {
+            k: HighlightOut(**h) for k, h in raw["highlights"].items()
+            if isinstance(h, dict) and h.get("segment_id") is not None and h.get("start") is not None
+        }
 
     qm = instance.quantitative_metrics or {}
     if not instance.strengths:
@@ -188,6 +241,10 @@ class LLMReportOut(BaseModel):
     improvements: list[ImprovementOut] = []
     # Only filled where the endpoint eager-loads it (the detail views).
     feedback: list[ReportFeedbackOut] | None = None
+    # best_moment / moment_to_rethink / best_interaction; empty without segments.
+    highlights: dict[str, HighlightOut] = {}
+    # The teacher's own view, given before the reveal. Teacher endpoint only.
+    self_rating: SelfRatingOut | None = None
     curriculum_coverage: CurriculumCoverageOut | None = None
     accuracy_analysis: AccuracyAnalysisOut | None = None
     chapter_info: ChapterInfoOut | None = None
@@ -209,8 +266,9 @@ class LLMReportOut(BaseModel):
                 state = sa_inspect(data)
             except Exception:
                 state = None
-            if state is not None and "feedback" in state.unloaded:
-                source = _ReportView(data)
+            hidden = {n for n in _OPTIONAL_REPORT_RELATIONS if state is not None and n in state.unloaded}
+            if hidden:
+                source = _ReportView(data, hidden)
 
         # First run normal validation
         instance = handler(source)
