@@ -53,6 +53,8 @@ from app.schemas.timetable import TimetableEntryOut
 from app.services.timetable_service import build_timetable_entry_out, day_sort_index
 from app.schemas.class_brief import ClassBriefMuteIn, ClassBriefOut
 from app.services import class_brief_service
+from app.schemas.growth import GrowthOut, TrendsExclusionIn, TrendsExclusionOut
+from app.services import growth_service
 
 router = APIRouter()
 
@@ -983,6 +985,27 @@ async def put_self_rating(
     await db.commit()
     await db.refresh(rating)
     return rating
+
+
+@router.put("/recordings/{recording_id}/trends", response_model=TrendsExclusionOut)
+async def set_trends_exclusion(
+    recording_id: int,
+    body: TrendsExclusionIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Leave a lecture out of My Growth trends, or put it back."""
+    report = await growth_service.set_excluded(db, recording_id, teacher.id, body.excluded)
+    return TrendsExclusionOut(excluded_from_trends=report.excluded_from_trends)
+
+
+@router.get("/growth", response_model=GrowthOut)
+async def get_my_growth(
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Trends per area and progress on the current focus, against the teacher's own past only."""
+    return await growth_service.build_growth(db, teacher.id)
 
 
 @router.post("/recordings/{recording_id}/clip-plays", status_code=204)

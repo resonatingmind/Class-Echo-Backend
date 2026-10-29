@@ -1,6 +1,6 @@
 """Teacher 👍/👎 on report findings, and the disagreement summary used to tune the rubric."""
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.llm_report import LLMReport
@@ -43,6 +43,21 @@ async def list_feedback(db: AsyncSession, report_id: int) -> list[ReportFeedback
     return list(result.scalars())
 
 
+async def _feedback_after_change(db: AsyncSession, report_id: int) -> list[ReportFeedback]:
+    """The report's feedback after a save. A lecture is only left out of My
+    Growth trends while a doesn't-fit-this-class dispute stands, so taking that
+    dispute back puts the lecture back in."""
+    rows = await list_feedback(db, report_id)
+    if not any(r.verdict == FeedbackVerdict.disagree.value and "class_type" in (r.reasons or []) for r in rows):
+        await db.execute(
+            update(LLMReport)
+            .where(LLMReport.id == report_id, LLMReport.excluded_from_trends.is_(True))
+            .values(excluded_from_trends=False)
+        )
+        await db.commit()
+    return rows
+
+
 async def upsert_feedback(
     db: AsyncSession, report: LLMReport, teacher_id: int, body: ReportFeedbackIn,
 ) -> list[ReportFeedback]:
@@ -73,7 +88,7 @@ async def upsert_feedback(
     row.reasons = reasons
     row.comment = comment
     await db.commit()
-    return await list_feedback(db, report.id)
+    return await _feedback_after_change(db, report.id)
 
 
 async def remove_feedback(
@@ -87,7 +102,7 @@ async def remove_feedback(
         )
     )
     await db.commit()
-    return await list_feedback(db, report_id)
+    return await _feedback_after_change(db, report_id)
 
 
 def _rate(part: int, whole: int) -> float | None:

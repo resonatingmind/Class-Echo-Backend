@@ -235,6 +235,8 @@ class LLMReportOut(BaseModel):
     score_breakdown: dict | None
     quantitative_metrics: dict | None
     rubric_version: str | None = None
+    # The teacher left this lecture out of My Growth trends.
+    excluded_from_trends: bool = False
     # Structured findings. Reports scored before rubric 2 only have plain
     # strings, which are lifted into this shape with the extra fields empty.
     strengths: list[StrengthOut] = []

@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, Float, Integer, Text, func
+from sqlalchemy import Boolean, String, DateTime, ForeignKey, Float, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -22,6 +22,9 @@ class LLMReport(Base):
     first_opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # How many times the teacher played a clip from this report.
     clip_plays: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # The teacher left this lecture out of My Growth trends; only allowed once
+    # they disputed a finding as not fitting this type of class.
+    excluded_from_trends: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     recording: Mapped["Recording"] = relationship("Recording", back_populates="report")
