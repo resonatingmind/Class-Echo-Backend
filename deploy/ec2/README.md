@@ -128,11 +128,35 @@ Then point the frontend at it:
 
 ---
 
+## Deploying a new version (from GitHub)
+
+The server has no git checkout. Deploys run from GitHub Actions, never from a laptop:
+
+1. Once: in GitHub → `Class-Echo-Backend` → Settings → Secrets and variables → Actions, add
+   - `EC2_HOST`: the Elastic IP (`3.24.211.242`)
+   - `EC2_SSH_KEY`: the whole contents of the instance's `.pem` key
+   - `API_URL`: the public API (`https://3-24-211-242.sslip.io`)
+2. Push your commits to `main`. Pushing alone deploys nothing.
+3. Actions → **Deploy to EC2** → *Run workflow* → pick the branch.
+
+The workflow uploads exactly that commit, backs up the running code and `.env`
+(`~/backend-backup-*.tar.gz`), swaps in the new folder with the same `.env`, and runs
+`deploy.sh`: rebuild, Alembic migrations on Supabase, restart, health check. The deployed
+commit is in `~/backend/REVISION`.
+
+**Roll back:** on the server, `mv ~/backend ~/backend-bad && mv ~/backend-old-<newest> ~/backend`,
+then `bash ~/backend/deploy/ec2/deploy.sh`. Migrations are not undone, so roll back
+only to code that works with the current schema.
+
+The frontend deploys itself: Vercel builds every push to the frontend's `main`. Deploy the
+backend first when a frontend change needs new API endpoints.
+
 ## Day-to-day operations (run in `~/backend/deploy/ec2`)
 
 | Task | Command |
 |---|---|
-| Deploy latest `main` | `bash deploy.sh` |
+| Rebuild and restart what's on the server | `bash deploy.sh` |
+| Deployed commit | `cat ~/backend/REVISION` |
 | Status | `docker compose ps` |
 | Logs | `docker compose logs -f api` / `docker compose logs -f worker` |
 | Restart worker only | `docker compose restart worker` |

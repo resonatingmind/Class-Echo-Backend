@@ -1,0 +1,76 @@
+name: Deploy to EC2
+
+# Started by hand from the Actions tab (Run workflow, pick the branch).
+# Pushing to main never deploys by itself: the API, the worker and the
+# Supabase migrations all change in one step, so it should be a choice.
+on:
+  workflow_dispatch:
+
+# Never two deploys at once; a second one waits for the first.
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Repository secrets (Settings -> Secrets and variables -> Actions):
+      #   EC2_HOST     the Elastic IP, e.g. 3.24.211.242
+      #   EC2_SSH_KEY  the full private key (.pem) for the ubuntu user
+      #   API_URL      the public API, e.g. https://3-24-211-242.sslip.io
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      API_URL: ${{ secrets.API_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The server has no git checkout: it gets a clean copy of exactly this commit.
+      - name: Package this commit
+        run: git archive --format=tar.gz -o release.tar.gz HEAD
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload
+        run: scp -i ~/.ssh/ec2.pem release.tar.gz "ubuntu@$EC2_HOST:/home/ubuntu/release-${GITHUB_SHA}.tar.gz"
+
+      # Back up the running code and .env, unpack the new copy next to it,
+      # carry .env over, swap the folders and run deploy.sh (build, migrate,
+      # restart, health check). The previous folder stays as backend-old-*
+      # for a rollback; only the newest three backups and old folders are kept.
+      - name: Install and restart
+        run: |
+          ssh -i ~/.ssh/ec2.pem "ubuntu@$EC2_HOST" "SHA=${GITHUB_SHA} bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~
+          STAMP=$(date +%Y%m%d-%H%M%S)
+          tar czf "backend-backup-$STAMP.tar.gz" backend
+          rm -rf backend-new && mkdir backend-new
+          tar xzf "release-$SHA.tar.gz" -C backend-new
+          cp -p backend/deploy/ec2/.env backend-new/deploy/ec2/.env
+          echo "$SHA" > backend-new/REVISION
+          mv backend "backend-old-$STAMP"
+          mv backend-new backend
+          rm -f "release-$SHA.tar.gz"
+          { ls -1dt backend-backup-*.tar.gz 2>/dev/null || true; } | tail -n +4 | xargs -r rm -f
+          { ls -1dt backend-old-* 2>/dev/null || true; } | tail -n +4 | xargs -r rm -rf
+          bash ~/backend/deploy/ec2/deploy.sh
+          REMOTE
+
+      - name: Check the live API
+        run: |
+          for _ in $(seq 1 12); do
+            if curl -fsS "$API_URL/health"; then echo; exit 0; fi
+            sleep 5
+          done
+          echo "The API did not answer on $API_URL/health" >&2
+          exit 1
+
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/ec2.pem
