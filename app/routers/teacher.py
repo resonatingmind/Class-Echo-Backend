@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,8 @@ from app.tasks.llm_tasks import process_recording
 from app.models.timetable_entry import TimetableEntry
 from app.schemas.timetable import TimetableEntryOut
 from app.services.timetable_service import build_timetable_entry_out, day_sort_index
+from app.schemas.class_brief import ClassBriefMuteIn, ClassBriefOut
+from app.services import class_brief_service
 
 router = APIRouter()
 
@@ -105,6 +107,32 @@ async def get_my_timetable(
         key=lambda e: (day_sort_index(e.day_of_week), e.period_number),
     )
     return [build_timetable_entry_out(e) for e in entries]
+
+
+@router.get("/timetable/{entry_id}/brief", response_model=ClassBriefOut)
+async def get_class_brief(
+    entry_id: int,
+    on: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """The recap shown before a timetabled period. `on` is the teacher's local
+    date, which picks a planner entry dated today; the server's date otherwise."""
+    entry = await class_brief_service.get_own_entry(db, entry_id, teacher.id)
+    return await class_brief_service.build_brief(db, entry, teacher.id, on or date.today())
+
+
+@router.put("/timetable/{entry_id}/brief/mute", response_model=ClassBriefOut)
+async def mute_class_brief(
+    entry_id: int,
+    body: ClassBriefMuteIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Turn the brief off (or back on) for this class + subject, every period."""
+    entry = await class_brief_service.get_own_entry(db, entry_id, teacher.id)
+    await class_brief_service.set_muted(db, teacher.id, entry.subject_id, body.muted)
+    return await class_brief_service.build_brief(db, entry, teacher.id, date.today())
 
 
 def _teacher_out(teacher) -> TeacherOut:

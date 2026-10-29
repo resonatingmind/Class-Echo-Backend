@@ -40,6 +40,7 @@ from app.models.system_setting import SystemSetting
 from app.models.audit_log import AuditLog
 from app.models.report_feedback import ReportFeedback, FeedbackTarget, FeedbackVerdict
 from app.models.self_rating import SelfRating
+from app.models.class_brief_mute import ClassBriefMute
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
@@ -47,4 +48,5 @@ __all__ = [
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
     "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
     "SystemSetting", "AuditLog", "ReportFeedback", "FeedbackTarget", "FeedbackVerdict", "SelfRating",
+    "ClassBriefMute",
 ]

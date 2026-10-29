@@ -279,6 +279,20 @@ def _normalize_improvements(items) -> list[dict]:
     return out
 
 
+def _normalize_class_summary(value) -> dict:
+    raw = value if isinstance(value, dict) else {}
+
+    def bullets(key: str, limit: int) -> list[str]:
+        items = raw.get(key) if isinstance(raw.get(key), list) else []
+        return [s for s in (str(x).strip() for x in items) if s][:limit]
+
+    return {
+        "covered": bullets("covered", 4),
+        "unfinished": bullets("unfinished", 3),
+        "recall_questions": bullets("recall_questions", 3),
+    }
+
+
 def _validate_and_fix(result: dict) -> dict:
     scores = result.get("scores", {})
     for dim, max_val in SCORE_WEIGHTS.items():
@@ -309,6 +323,8 @@ def _validate_and_fix(result: dict) -> dict:
     # Plain-text copies for app builds that predate structured findings.
     result["top_strengths"] = [s["text"] for s in result["strengths"]]
     result["priority_improvements"] = [i["observation"] for i in result["improvements"]]
+    # Read back by the next-class brief (class_brief_service).
+    result["class_summary"] = _normalize_class_summary(result.get("class_summary"))
 
     # Handle curriculum_coverage and accuracy_analysis
     cc = result.setdefault("curriculum_coverage", {})

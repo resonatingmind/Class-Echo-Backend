@@ -22,7 +22,8 @@ SCORING_503_RETRY_DELAYS_S: tuple[float, ...] = (10, 30)
 #   1 — free-form JSON, string strengths/improvements (reports before this field)
 #   2 — schema-constrained output at temperature 0, strengths with evidence,
 #       improvements with a try-this script and one focus; segment citations
-#       and speaker-aware question counts when the transcript is segmented
+#       and speaker-aware question counts when the transcript is segmented;
+#       a class_summary for the next-class brief (not scored)
 RUBRIC_VERSION = "2"
 SCORING_TEMPERATURE = 0.0
 
@@ -132,6 +133,16 @@ For each give:
   the lecture is in Hinglish, write the script in Hinglish (Latin script).
 - why: one line on why it helps students
 Address the teacher as "you". No jargon.
+
+## Class Summary
+A short recap the teacher reads before the next class with the same students.
+It describes the lesson, not the teacher, so never mention scores or feedback.
+- covered: 3 or 4 short bullets, what was taught in this lecture
+- unfinished: up to 3 bullets, learning plan items or key concepts that were not
+  covered, or were rushed and need revisiting; empty if nothing was left over
+- recall_questions: 2 or 3 quick questions the teacher can ask students at the
+  start of the next class to check they remember this lesson, in the language
+  the teacher teaches in
 {segment_instructions}
 
 ## Output Format
@@ -162,6 +173,11 @@ Respond ONLY with a valid JSON object. Never omit any field. Every score must be
   "improvements": [
     {{ "area": "<dimension>", "observation": "<what happened>", "try_this": "<script or action for next class>", "why": "<one line>", "is_focus": <true for exactly one> }}
   ],
+  "class_summary": {{
+    "covered": ["<what was taught>"],
+    "unfinished": ["<left over or rushed>"],
+    "recall_questions": ["<question for students>"]
+  }},
   "curriculum_coverage": {{
     "covered_concepts": [<list of covered concepts>],
     "missing_concepts": [<list of missed concepts>],
@@ -305,6 +321,15 @@ SCORING_RESPONSE_SCHEMA: dict = {
                 "required": ["area", "observation", "try_this", "why", "is_focus"],
             },
         },
+        "class_summary": {
+            "type": "object",
+            "properties": {
+                "covered": {**_STRING_LIST, "maxItems": 4},
+                "unfinished": {**_STRING_LIST, "maxItems": 3},
+                "recall_questions": {**_STRING_LIST, "maxItems": 3},
+            },
+            "required": ["covered", "unfinished", "recall_questions"],
+        },
         "curriculum_coverage": {
             "type": "object",
             "properties": {
@@ -350,7 +375,7 @@ SCORING_RESPONSE_SCHEMA: dict = {
     },
     "required": [
         "scores", "total", "quantitative", "overall_notes", "strengths", "improvements",
-        "curriculum_coverage", "accuracy_analysis", "confidence_analysis",
+        "class_summary", "curriculum_coverage", "accuracy_analysis", "confidence_analysis",
         "engagement_analysis", "speech_analysis",
     ],
 }
