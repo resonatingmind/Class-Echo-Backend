@@ -41,6 +41,7 @@ from app.models.audit_log import AuditLog
 from app.models.report_feedback import ReportFeedback, FeedbackTarget, FeedbackVerdict
 from app.models.self_rating import SelfRating
 from app.models.class_brief_mute import ClassBriefMute
+from app.models.shared_clip import SharedClip
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
@@ -48,5 +49,5 @@ __all__ = [
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
     "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
     "SystemSetting", "AuditLog", "ReportFeedback", "FeedbackTarget", "FeedbackVerdict", "SelfRating",
-    "ClassBriefMute",
+    "ClassBriefMute", "SharedClip",
 ]

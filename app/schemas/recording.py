@@ -183,8 +183,25 @@ class ReportFeedbackIn(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+class SharedClipIn(BaseModel):
+    start: float = Field(ge=0)
+    title: str = Field(min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class SharedClipOut(BaseModel):
+    id: int
+    start: float
+    title: str
+    note: str | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # Report relationships that only some endpoints eager-load.
-_OPTIONAL_REPORT_RELATIONS = ("feedback", "self_rating")
+_OPTIONAL_REPORT_RELATIONS = ("feedback", "self_rating", "shared_clips")
 
 
 class _ReportView:
@@ -247,6 +264,8 @@ class LLMReportOut(BaseModel):
     highlights: dict[str, HighlightOut] = {}
     # The teacher's own view, given before the reveal. Teacher endpoint only.
     self_rating: SelfRatingOut | None = None
+    # Moments the teacher chose to show their school admin. Detail views only.
+    shared_clips: list[SharedClipOut] | None = None
     curriculum_coverage: CurriculumCoverageOut | None = None
     accuracy_analysis: AccuracyAnalysisOut | None = None
     chapter_info: ChapterInfoOut | None = None

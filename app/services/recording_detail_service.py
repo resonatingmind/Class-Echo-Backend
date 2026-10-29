@@ -18,6 +18,7 @@ async def get_recording_detail(
             selectinload(Recording.subject),
             selectinload(Recording.report),
             selectinload(Recording.report).selectinload(LLMReport.feedback),
+            selectinload(Recording.report).selectinload(LLMReport.shared_clips),
 
             selectinload(Recording.chapter).selectinload(
                 Chapter.documents

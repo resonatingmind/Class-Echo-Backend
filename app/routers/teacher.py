@@ -17,6 +17,7 @@ from app.models.student import Student
 from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.models.report_feedback import FeedbackTarget
 from app.models.self_rating import SelfRating
+from app.models.shared_clip import SharedClip
 from app.schemas.recording import (
     LLMReportOut,
     RecordingUpdate,
@@ -25,6 +26,8 @@ from app.schemas.recording import (
     ReportFeedbackOut,
     SelfRatingIn,
     SelfRatingOut,
+    SharedClipIn,
+    SharedClipOut,
 )
 from app.services import report_feedback_service
 from app.schemas.student import StudentOut
@@ -940,6 +943,7 @@ async def get_teacher_recording(
             selectinload(Recording.report).selectinload(LLMReport.recording),
             selectinload(Recording.report).selectinload(LLMReport.feedback),
             selectinload(Recording.report).selectinload(LLMReport.self_rating),
+            selectinload(Recording.report).selectinload(LLMReport.shared_clips),
             selectinload(Recording.learning_plan),
             selectinload(Recording.chapter)
             .selectinload(Chapter.documents),
@@ -1020,6 +1024,60 @@ async def record_clip_play(
         update(LLMReport).where(LLMReport.id == report.id).values(clip_plays=LLMReport.clip_plays + 1)
     )
     await db.commit()
+
+
+@router.put("/recordings/{recording_id}/shared-clips", response_model=list[SharedClipOut])
+async def share_clip(
+    recording_id: int,
+    body: SharedClipIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Show one moment of the lecture to the school admin. Sharing the same moment twice updates it."""
+    report = await _own_report(db, recording_id, teacher.id)
+    recording = await db.get(Recording, recording_id)
+    segments = recording.transcript_segments or []
+    if not segments:
+        raise HTTPException(status_code=400, detail="This lecture has no timed transcript to clip")
+    if body.start > max(float(s.get("end") or 0) for s in segments):
+        raise HTTPException(status_code=400, detail="That moment is past the end of the lecture")
+
+    start = round(body.start, 2)
+    existing = await db.execute(
+        select(SharedClip).where(SharedClip.report_id == report.id, SharedClip.start == start)
+    )
+    clip = existing.scalar_one_or_none()
+    if clip is None:
+        clip = SharedClip(report_id=report.id, teacher_id=teacher.id, start=start)
+        db.add(clip)
+    clip.title = body.title.strip()
+    clip.note = (body.note or "").strip() or None
+    await db.commit()
+    return await _shared_clips(db, report.id)
+
+
+@router.delete("/recordings/{recording_id}/shared-clips/{clip_id}", response_model=list[SharedClipOut])
+async def unshare_clip(
+    recording_id: int,
+    clip_id: int,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Stop showing a moment to the school admin."""
+    report = await _own_report(db, recording_id, teacher.id)
+    clip = await db.get(SharedClip, clip_id)
+    if clip is None or clip.report_id != report.id:
+        raise HTTPException(status_code=404, detail="Shared clip not found")
+    await db.delete(clip)
+    await db.commit()
+    return await _shared_clips(db, report.id)
+
+
+async def _shared_clips(db: AsyncSession, report_id: int) -> list[SharedClip]:
+    result = await db.execute(
+        select(SharedClip).where(SharedClip.report_id == report_id).order_by(SharedClip.start)
+    )
+    return list(result.scalars())
 
 
 async def _own_report(db: AsyncSession, recording_id: int, teacher_id: int) -> LLMReport:

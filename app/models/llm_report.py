@@ -34,3 +34,7 @@ class LLMReport(Base):
     feedback: Mapped[list["ReportFeedback"]] = relationship(
         "ReportFeedback", back_populates="report", cascade="all, delete-orphan", passive_deletes=True,
     )
+    shared_clips: Mapped[list["SharedClip"]] = relationship(
+        "SharedClip", back_populates="report", cascade="all, delete-orphan", passive_deletes=True,
+        order_by="SharedClip.start",
+    )
