@@ -76,6 +76,13 @@ services:
     volumes:
       - uploads_data:/app/uploads
 
+  # Schedules periodic tasks (class reminders every 5 min). Exactly one.
+  beat:
+    <<: *backend
+    command: celery -A celery_worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped

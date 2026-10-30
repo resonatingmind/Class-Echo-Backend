@@ -12,11 +12,13 @@ from datetime import date
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.chapter import Chapter
 from app.models.class_brief_mute import ClassBriefMute
+from app.models.class_brief_open import ClassBriefOpen
 from app.models.learning_plan import LearningPlan
 from app.models.recording import Recording, RecordingStatus
 from app.models.timetable_entry import TimetableEntry
@@ -164,6 +166,16 @@ async def build_brief(db: AsyncSession, entry: TimetableEntry, teacher_id: int, 
     brief.todays_plan = LearningPlanOut.model_validate(plan, from_attributes=True) if plan else None
     brief.focus = await _focus(db, teacher_id)
     return brief
+
+
+async def record_open(db: AsyncSession, entry: TimetableEntry, teacher_id: int, on: date, source: str) -> None:
+    """Count the brief as seen for this class today. Later opens the same day are ignored."""
+    await db.execute(
+        pg_insert(ClassBriefOpen)
+        .values(teacher_id=teacher_id, timetable_entry_id=entry.id, on_date=on, source=source)
+        .on_conflict_do_nothing(constraint="uq_class_brief_open")
+    )
+    await db.commit()
 
 
 async def set_muted(db: AsyncSession, teacher_id: int, subject_id: int, muted: bool) -> None:

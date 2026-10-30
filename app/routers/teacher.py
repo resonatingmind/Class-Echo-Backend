@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
+from sqlalchemy import delete, select, func, update
 from sqlalchemy.orm import selectinload
 
 from app.models.chapter import Chapter
@@ -18,6 +18,7 @@ from app.schemas.subject import SubjectOut, SubjectWithClassOut
 from app.models.report_feedback import FeedbackTarget
 from app.models.self_rating import SelfRating
 from app.models.shared_clip import SharedClip
+from app.models.device_token import DeviceToken
 from app.schemas.recording import (
     LLMReportOut,
     RecordingUpdate,
@@ -54,7 +55,13 @@ from app.tasks.llm_tasks import process_recording
 from app.models.timetable_entry import TimetableEntry
 from app.schemas.timetable import TimetableEntryOut
 from app.services.timetable_service import build_timetable_entry_out, day_sort_index
-from app.schemas.class_brief import ClassBriefMuteIn, ClassBriefOut
+from app.schemas.class_brief import (
+    ClassBriefMuteIn,
+    ClassBriefOpenIn,
+    ClassBriefOut,
+    DeviceTokenIn,
+    DeviceTokenRemoveIn,
+)
 from app.services import class_brief_service
 from app.schemas.growth import GrowthOut, TrendsExclusionIn, TrendsExclusionOut
 from app.services import growth_service
@@ -138,6 +145,49 @@ async def mute_class_brief(
     entry = await class_brief_service.get_own_entry(db, entry_id, teacher.id)
     await class_brief_service.set_muted(db, teacher.id, entry.subject_id, body.muted)
     return await class_brief_service.build_brief(db, entry, teacher.id, date.today())
+
+
+@router.post("/timetable/{entry_id}/brief/opened", status_code=204)
+async def class_brief_opened(
+    entry_id: int,
+    body: ClassBriefOpenIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """The teacher saw the brief before this class (the brief open-rate metric)."""
+    entry = await class_brief_service.get_own_entry(db, entry_id, teacher.id)
+    await class_brief_service.record_open(db, entry, teacher.id, body.on, body.source)
+
+
+@router.put("/device-token", status_code=204)
+async def register_device_token(
+    body: DeviceTokenIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Register this phone for class reminders. A token signed in again by someone else moves to them."""
+    result = await db.execute(select(DeviceToken).where(DeviceToken.token == body.token))
+    device = result.scalar_one_or_none()
+    if device is None:
+        device = DeviceToken(token=body.token)
+        db.add(device)
+    device.teacher_id = teacher.id
+    device.platform = body.platform
+    device.timezone = body.timezone
+    await db.commit()
+
+
+@router.delete("/device-token", status_code=204)
+async def remove_device_token(
+    body: DeviceTokenRemoveIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_teacher),
+):
+    """Stop reminders on this phone, e.g. on sign-out."""
+    await db.execute(
+        delete(DeviceToken).where(DeviceToken.token == body.token, DeviceToken.teacher_id == teacher.id)
+    )
+    await db.commit()
 
 
 def _teacher_out(teacher) -> TeacherOut:

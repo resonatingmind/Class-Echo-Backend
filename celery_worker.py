@@ -5,7 +5,12 @@ celery_app = Celery(
     "scholarmetric",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.llm_tasks", "app.tasks.document_tasks", "app.tasks.email_tasks"],
+    include=[
+        "app.tasks.llm_tasks",
+        "app.tasks.document_tasks",
+        "app.tasks.email_tasks",
+        "app.tasks.reminder_tasks",
+    ],
 )
 
 celery_app.conf.update(
@@ -21,4 +26,8 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    # Needs a `celery beat` process next to the worker (see the compose files).
+    beat_schedule={
+        "class-reminders": {"task": "send_class_reminders", "schedule": 5 * 60},
+    },
 )

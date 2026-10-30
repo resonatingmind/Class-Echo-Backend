@@ -1,6 +1,8 @@
-from datetime import datetime
+from datetime import date, datetime
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.learning_plan import LearningPlanOut
 
@@ -38,3 +40,28 @@ class ClassBriefOut(BaseModel):
 
 class ClassBriefMuteIn(BaseModel):
     muted: bool
+
+
+class ClassBriefOpenIn(BaseModel):
+    # The teacher's local date of the class.
+    on: date
+    source: Literal["dashboard", "push"] = "dashboard"
+
+
+class DeviceTokenIn(BaseModel):
+    token: str = Field(min_length=10, max_length=255)
+    platform: Literal["ios", "android"]
+    timezone: str = Field(min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Unknown timezone")
+        return value
+
+
+class DeviceTokenRemoveIn(BaseModel):
+    token: str = Field(min_length=10, max_length=255)

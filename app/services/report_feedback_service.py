@@ -1,14 +1,18 @@
 """Teacher 👍/👎 on report findings, and the disagreement summary used to tune the rubric."""
 
+from datetime import date, timedelta
+
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.class_brief_open import ClassBriefOpen
 from app.models.llm_report import LLMReport
 from app.models.recording import Recording
 from app.models.report_feedback import FeedbackTarget, FeedbackVerdict, ReportFeedback
 from app.models.school import School
 from app.models.self_rating import SelfRating
 from app.models.teacher import Teacher
+from app.models.timetable_entry import TimetableEntry
 from app.schemas.recording import LLMReportOut, ReportFeedbackIn
 from app.services.llm_pipeline.config import SCORE_WEIGHTS
 
@@ -109,6 +113,28 @@ def _rate(part: int, whole: int) -> float | None:
     return round(part / whole, 3) if whole else None
 
 
+async def _brief_opens(db: AsyncSession, today: date | None = None) -> tuple[int, int]:
+    """(briefs opened, timetabled classes) since the first recorded open.
+
+    Classes are counted from the timetable for every day in that span, so
+    holidays count as classes and the rate reads a little low.
+    """
+    opens, first = (await db.execute(
+        select(func.count(ClassBriefOpen.id), func.min(ClassBriefOpen.on_date))
+    )).one()
+    if not opens:
+        return 0, 0
+    per_weekday = dict((await db.execute(
+        select(TimetableEntry.day_of_week, func.count()).group_by(TimetableEntry.day_of_week)
+    )).all())
+    today = today or date.today()
+    classes = sum(
+        per_weekday.get((first + timedelta(days=i)).strftime("%A"), 0)
+        for i in range((today - first).days + 1)
+    )
+    return opens, max(classes, opens)
+
+
 async def _adoption(db: AsyncSession, report_filter: list, feedback_rows: list[ReportFeedback]) -> dict:
     """The roadmap's success numbers: are reports opened, try-this found
     useful, clips played and the self-rating step used."""
@@ -145,7 +171,12 @@ async def _adoption(db: AsyncSession, report_filter: list, feedback_rows: list[R
     given = sum(n for skipped, n in ratings if not skipped)
     skipped = sum(n for skipped, n in ratings if skipped)
 
+    brief_opens, brief_classes = await _brief_opens(db)
+
     return {
+        "brief_opens": brief_opens,
+        "brief_classes": brief_classes,
+        "brief_open_rate": _rate(brief_opens, brief_classes),
         "reports_opened": len(opened),
         "open_rate": _rate(len(opened), len(reports)),
         "median_hours_to_open": round(hours_to_open[len(hours_to_open) // 2], 1) if hours_to_open else None,
