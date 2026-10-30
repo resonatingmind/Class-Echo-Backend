@@ -7,8 +7,10 @@ What these tests cover:
 - Email uniqueness enforcement across all user tables
 - Role guard: only 'admin' role can access these endpoints
 """
+import pytest_asyncio
 from sqlalchemy import select
 
+from app.models.recording import Recording, RecordingStatus
 from app.models.school_admin import SchoolAdmin
 
 
@@ -211,3 +213,35 @@ async def test_reactivate_school(client, admin_token, school, school_admin_user)
     )
     assert resp.status_code == 200
     assert resp.json()["admin"]["status"] == "active"
+
+
+# ── Recording detail ──────────────────────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def recording(db_session, subject, teacher_user):
+    recording = Recording(
+        subject_id=subject.id,
+        teacher_id=teacher_user.id,
+        cloudinary_url="https://fake.cloudinary.com/a.mp3",
+        cloudinary_public_id="fake/a",
+        status=RecordingStatus.completed,
+    )
+    db_session.add(recording)
+    await db_session.commit()
+    return recording
+
+
+async def test_get_recording_detail(client, admin_token, recording):
+    resp = await client.get(f"/admin/recordings/{recording.id}", headers={"Authorization": admin_token})
+    assert resp.status_code == 200
+    assert resp.json()["id"] == recording.id
+
+
+async def test_get_recording_detail_not_found(client, admin_token, admin_user):
+    resp = await client.get("/admin/recordings/999999", headers={"Authorization": admin_token})
+    assert resp.status_code == 404
+
+
+async def test_school_admin_cannot_use_admin_recording_detail(client, school_admin_token):
+    resp = await client.get("/admin/recordings/1", headers={"Authorization": school_admin_token})
+    assert resp.status_code == 403

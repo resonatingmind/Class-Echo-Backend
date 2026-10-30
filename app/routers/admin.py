@@ -18,6 +18,7 @@ from app.models.school_admin import SchoolAdmin
 from app.models.teacher import Teacher
 from app.services import audit_service, email_service, invite_service, settings_service
 from app.services import teacher_onboarding_service as onboarding
+from app.services.recording_detail_service import get_recording_detail
 from app.models.class_ import Class
 from app.models.subject import Subject
 from app.models.student import Student
@@ -2201,6 +2202,18 @@ async def list_school_subject_recordings(
         .order_by(Recording.uploaded_at.desc())
     )
     return result.scalars().all()
+
+
+@router.get("/recordings/{recording_id}", response_model=RecordingWithReport)
+async def get_recording(
+    recording_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_admin),
+):
+    recording = await get_recording_detail(db, recording_id)
+    if recording is None:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return recording
 
 
 @router.delete("/recordings/{recording_id}", status_code=204)
