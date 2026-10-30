@@ -37,14 +37,13 @@ from app.schemas.school_dashboard import (
 from app.schemas.teacher_analytics import TeacherAnalyticsOut
 from app.schemas.teacher_recordings import TeacherRecordingOut
 from app.services.s3_service import upload_image, upload_document
-from app.services import chapter_service
+from app.services import admin_privacy, chapter_service, growth_service
+from app.schemas.growth import AdminTeacherGrowthOut, SchoolGrowthOut
 from app.services.school_dashboard_service import (
     get_school_dashboard_overview,
     get_school_analytics,
-    get_teacher_ranking,
     get_recent_activity,
 )
-from app.services.teacher_analytics_service import get_teacher_analytics
 from app.services.teacher_recordings_service import (
     get_teacher_recordings,
     get_chapter_recordings,
@@ -54,7 +53,6 @@ from app.services.recording_detail_service import (
 )
 from app.models.chapter_document import ChapterDocument
 from app.services.teacher_analytics_filters_service import (
-    get_teacher_analytics_filters,
     AnalyticsFiltersOut,
 )
 from app.services.teacher_profile_service import get_teacher_profile
@@ -123,6 +121,8 @@ async def update_my_profile(
         school_admin.name = payload["name"]
     if "school_name" in payload:
         school.name = payload["school_name"]
+    if payload.get("streak_min_recordings") is not None:
+        school.streak_min_recordings = payload["streak_min_recordings"]
     if "school_address" in payload:
         school.address = payload["school_address"]
 
@@ -201,10 +201,17 @@ async def dashboard_teacher_ranking(
     db: AsyncSession = Depends(get_db),
     school_admin=Depends(get_active_school_admin),
 ):
-    return await get_teacher_ranking(
-        db,
-        school_admin.school_id,
-    )
+    # Teachers are compared only with their own past; see GET /school/growth.
+    raise HTTPException(status_code=410, detail="Teacher ranking was removed. See each teacher's growth instead.")
+
+
+@router.get("/growth", response_model=SchoolGrowthOut)
+async def school_growth(
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    """Each teacher's status against their own past, and the school's common weak areas. No ranking."""
+    return await growth_service.school_growth(db, school_admin.school_id)
 
 
 @router.get(
@@ -508,19 +515,32 @@ async def teacher_analytics(
             status_code=404,
             detail="Teacher not found",
         )
-    return await get_teacher_analytics(
-    db=db,
-    teacher_id=teacher_id,
+    # Per-lecture scores stay with the teacher; GET /school/teachers/{id}/growth replaces this.
+    raise HTTPException(status_code=403, detail=admin_privacy.PRIVATE_DETAIL)
 
-    class_id=class_id,
-    subject_id=subject_id,
-    semester=semester,
-    status=status,
-    search=search,
-    start_date=start_date,
-    end_date=end_date,
-)
-    
+
+@router.get("/teachers/{teacher_id}/growth", response_model=AdminTeacherGrowthOut)
+async def teacher_growth(
+    teacher_id: int,
+    db: AsyncSession = Depends(get_db),
+    school_admin=Depends(get_active_school_admin),
+):
+    """A teacher's trend, focus, streak and status, plus the milestones and clips they shared."""
+    teacher = (await db.execute(
+        select(Teacher).where(Teacher.id == teacher_id, Teacher.school_id == school_admin.school_id)
+    )).scalar_one_or_none()
+    if teacher is None:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    growth = await growth_service.build_growth(db, teacher, shared_only=True)
+    return AdminTeacherGrowthOut(
+        teacher_id=teacher.id,
+        name=teacher.name,
+        status=growth_service.teacher_status(growth),
+        growth=growth,
+        shared_clips=await admin_privacy.shared_clips_for_admin(db, teacher.id),
+    )
+
+
 @router.get(
     "/teachers/{teacher_id}/analytics/filters",
     response_model=AnalyticsFiltersOut,
@@ -530,10 +550,7 @@ async def teacher_analytics_filters(
     db: AsyncSession = Depends(get_db),
     school_admin=Depends(get_active_school_admin),
 ):
-    return await get_teacher_analytics_filters(
-        db=db,
-        teacher_id=teacher_id,
-    )
+    raise HTTPException(status_code=403, detail=admin_privacy.PRIVATE_DETAIL)
 
 @router.get(
     "/teachers/{teacher_id}/recordings",
@@ -560,10 +577,10 @@ async def teacher_recordings(
             detail="Teacher not found",
         )
 
-    return await get_teacher_recordings(
+    return admin_privacy.private_list(await get_teacher_recordings(
         db,
         teacher_id,
-    )
+    ))
 
 @router.get(
     "/chapters/{chapter_id}/recordings",
@@ -574,10 +591,18 @@ async def chapter_recordings(
     db: AsyncSession = Depends(get_db),
     school_admin=Depends(get_active_school_admin),
 ):
-    return await get_chapter_recordings(
+    owned = await db.execute(
+        select(Chapter.id)
+        .join(Subject, Subject.id == Chapter.subject_id)
+        .join(Class, Class.id == Subject.class_id)
+        .where(Chapter.id == chapter_id, Class.school_id == school_admin.school_id)
+    )
+    if owned.first() is None:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    return admin_privacy.private_list(await get_chapter_recordings(
         db=db,
         chapter_id=chapter_id,
-    )
+    ))
 
 @router.get(
     "/recordings/{recording_id}",
@@ -608,7 +633,7 @@ async def school_recording_detail(
             detail="Not authorized to view this recording",
         )
 
-    return recording
+    return admin_privacy.private_recording(recording)
 
 # ─── Classes ──────────────────────────────────────────────────────────────────
 
@@ -998,13 +1023,13 @@ async def list_subject_recordings(
     result = await db.execute(
         select(Recording)
         .options(
-            selectinload(Recording.report).selectinload(LLMReport.recording),
+            selectinload(Recording.report).selectinload(LLMReport.shared_clips),
             selectinload(Recording.learning_plan),
         )
         .where(Recording.subject_id == subject_id)
         .order_by(Recording.uploaded_at.desc())
     )
-    return result.scalars().all()
+    return [admin_privacy.private_recording(r) for r in result.scalars().all()]
 
 
 @router.get("/subjects/{subject_id}/reports", response_model=list[LLMReportOut])
@@ -1014,13 +1039,7 @@ async def list_subject_reports(
     school_admin=Depends(get_active_school_admin),
 ):
     await _get_owned_subject(subject_id, school_admin.school_id, db)
-    result = await db.execute(
-        select(LLMReport)
-        .join(Recording, LLMReport.recording_id == Recording.id)
-        .where(Recording.subject_id == subject_id)
-        .order_by(LLMReport.created_at.desc())
-    )
-    return result.scalars().all()
+    raise HTTPException(status_code=403, detail=admin_privacy.PRIVATE_DETAIL)
 
 
 # ─── Chapters ─────────────────────────────────────────────────────────────────
@@ -1455,6 +1474,7 @@ def _build_school_admin_profile(admin: SchoolAdmin) -> SchoolAdminProfileOut:
         school_name=school.name,
         school_logo_url=school.logo_url,
         school_address=school.address,
+        streak_min_recordings=school.streak_min_recordings,
         created_at=admin.created_at,
 
     )

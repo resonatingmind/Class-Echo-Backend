@@ -44,6 +44,7 @@ from app.models.class_brief_mute import ClassBriefMute
 from app.models.shared_clip import SharedClip
 from app.models.class_brief_open import ClassBriefOpen
 from app.models.device_token import DeviceToken
+from app.models.teacher_milestone import TeacherMilestone
 
 __all__ = [
     "Admin", "School", "SchoolAdmin", "Class", "Subject",
@@ -51,5 +52,5 @@ __all__ = [
     "Chapter", "ChapterDocument", "ChapterChunk", "ChapterKnowledge",
     "TimetableEntry", "LearningPlan", "AuthToken", "EmailLog", "EmailStatus",
     "SystemSetting", "AuditLog", "ReportFeedback", "FeedbackTarget", "FeedbackVerdict", "SelfRating",
-    "ClassBriefMute", "SharedClip", "ClassBriefOpen", "DeviceToken",
+    "ClassBriefMute", "SharedClip", "ClassBriefOpen", "DeviceToken", "TeacherMilestone",
 ]

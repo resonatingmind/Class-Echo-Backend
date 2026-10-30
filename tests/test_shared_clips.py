@@ -55,7 +55,7 @@ async def test_share_update_and_admin_sees_it(client, teacher_token, school_admi
     admin = {"Authorization": school_admin_token}
 
     resp = await client.get(f"/school/recordings/{report.recording_id}", headers=admin)
-    assert resp.json()["report"]["shared_clips"] == []
+    assert resp.json()["report"] is None and resp.json()["shared_clips"] == []
 
     resp = await client.put(_url(report, "/shared-clips"), headers=teacher, json={
         "start": 12.5, "title": "Best moment", "note": "  Proud of this one  ",
@@ -69,7 +69,7 @@ async def test_share_update_and_admin_sees_it(client, teacher_token, school_admi
     assert len(resp.json()) == 1 and resp.json()[0]["note"] is None
 
     resp = await client.get(f"/school/recordings/{report.recording_id}", headers=admin)
-    assert [c["start"] for c in resp.json()["report"]["shared_clips"]] == [12.5]
+    assert [c["start"] for c in resp.json()["shared_clips"]] == [12.5]
 
     resp = await client.get(_url(report), headers=teacher)
     assert [c["start"] for c in resp.json()["report"]["shared_clips"]] == [12.5]

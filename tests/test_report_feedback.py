@@ -113,16 +113,22 @@ async def test_other_teacher_cannot_give_feedback(client, db_session, school, re
     assert resp.status_code == 404
 
 
-async def test_school_admin_sees_disagreement_and_score_is_unchanged(
+async def test_disagreement_keeps_score_and_stays_private(
     client, teacher_token, school_admin_token, report,
 ):
     await client.put(_url(report), headers={"Authorization": teacher_token}, json={
         "target_type": "strength", "target_key": "1", "verdict": "disagree", "reasons": ["quote_out_of_context"],
     })
+    # Reports, disagreements included, stay with the teacher (admin_privacy).
     resp = await client.get(
         f"/school/recordings/{report.recording_id}", headers={"Authorization": school_admin_token},
     )
     assert resp.status_code == 200
+    assert resp.json()["report"] is None
+
+    resp = await client.get(
+        f"/teacher/recordings/{report.recording_id}", headers={"Authorization": teacher_token},
+    )
     data = resp.json()["report"]
     assert data["overall_score"] == 62
     assert data["feedback"][0]["target_key"] == "1"

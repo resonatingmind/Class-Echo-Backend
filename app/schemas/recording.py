@@ -367,6 +367,10 @@ class LLMReportOut(BaseModel):
 
 class RecordingWithReport(RecordingOut):
     report: LLMReportOut | None = None
+    # The school admin's view: no report, transcript or audio beyond the
+    # moments in shared_clips (services/admin_privacy.py).
+    report_private: bool = False
+    shared_clips: list[SharedClipOut] | None = None
 
 
 class RecordingUpdate(BaseModel):

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.services.s3_service import sign_url
 
 
@@ -16,6 +16,8 @@ class SchoolAdminProfileOut(BaseModel):
     school_name: str
     school_logo_url: str | None
     school_address: str | None
+    # Recordings a week needs to count towards a teacher's streak.
+    streak_min_recordings: int = 2
     created_at: datetime
     status: str = "active"
     email_verified: bool = False
@@ -36,3 +38,4 @@ class SchoolAdminUpdate(BaseModel):
     name: str | None = None
     school_name: str | None = None
     school_address: str | None = None
+    streak_min_recordings: int | None = Field(default=None, ge=1, le=10)

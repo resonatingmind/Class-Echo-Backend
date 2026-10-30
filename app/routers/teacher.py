@@ -63,8 +63,8 @@ from app.schemas.class_brief import (
     DeviceTokenRemoveIn,
 )
 from app.services import class_brief_service
-from app.schemas.growth import GrowthOut, TrendsExclusionIn, TrendsExclusionOut
-from app.services import growth_service
+from app.schemas.growth import GrowthOut, MilestoneOut, MilestoneShareIn, TrendsExclusionIn, TrendsExclusionOut
+from app.services import growth_service, milestone_service
 
 router = APIRouter()
 
@@ -1058,8 +1058,20 @@ async def get_my_growth(
     db: AsyncSession = Depends(get_db),
     teacher=Depends(get_active_teacher),
 ):
-    """Trends per area and progress on the current focus, against the teacher's own past only."""
-    return await growth_service.build_growth(db, teacher.id)
+    """Trends per area, focus progress, week streak and milestones, against the teacher's own past only."""
+    return await growth_service.build_growth(db, teacher)
+
+
+@router.put("/milestones/{milestone_id}", response_model=MilestoneOut)
+async def share_milestone(
+    milestone_id: int,
+    body: MilestoneShareIn,
+    db: AsyncSession = Depends(get_db),
+    teacher=Depends(get_active_teacher),
+):
+    """Show a milestone to the school admin, or make it private again."""
+    milestone = await milestone_service.set_shared(db, milestone_id, teacher.id, body.shared)
+    return milestone_service.milestone_out(milestone)
 
 
 @router.post("/recordings/{recording_id}/clip-plays", status_code=204)

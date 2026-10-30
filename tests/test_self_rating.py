@@ -105,7 +105,8 @@ async def test_teacher_open_is_recorded_and_rating_is_private(
         f"/school/recordings/{report.recording_id}", headers={"Authorization": school_admin_token},
     )
     assert resp.status_code == 200
-    assert resp.json()["report"]["self_rating"] is None
+    # The report, self-rating included, stays with the teacher.
+    assert resp.json()["report"] is None
     assert await _first_opened_at(db_session, report) is None
 
     resp = await client.get(_url(report), headers={"Authorization": teacher_token})

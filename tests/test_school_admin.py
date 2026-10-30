@@ -314,13 +314,13 @@ async def test_list_subject_recordings_empty(client, school_admin_token, subject
     assert resp.json() == []
 
 
-async def test_list_subject_reports_empty(client, school_admin_token, subject):
+async def test_subject_reports_are_private(client, school_admin_token, subject):
+    # Reports stay with the teacher (admin_privacy); the admin sees growth instead.
     resp = await client.get(
         f"/school/subjects/{subject.id}/reports",
         headers={"Authorization": school_admin_token},
     )
-    assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.status_code == 403
 
 
 async def test_list_recordings_for_other_school_subject(
